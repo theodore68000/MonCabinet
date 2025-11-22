@@ -1,0 +1,74 @@
+'use client';
+
+import { useState } from 'react';
+import { useRouter, useParams } from 'next/navigation';
+
+export default function ResetPassword() {
+  const router = useRouter();
+  const params = useParams();
+  const token = params.token as string;
+
+  const [motDePasse, setMotDePasse] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [message, setMessage] = useState('');
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMessage('');
+
+    if (motDePasse !== confirm) {
+      setMessage('Les mots de passe ne correspondent pas.');
+      return;
+    }
+
+    const res = await fetch(`http://localhost:3001/patient/reset-password/${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ motDePasse }),
+    });
+
+    const data = await res.json();
+
+    if (res.ok) {
+      alert('Mot de passe réinitialisé avec succès ✅');
+      router.push('/patient/login');
+    } else {
+      setMessage(data.message || 'Erreur lors de la réinitialisation.');
+    }
+  };
+
+  return (
+    <main className="flex items-center justify-center min-h-screen bg-gray-100">
+      <div className="bg-white p-8 rounded-xl shadow-md w-96">
+        <h1 className="text-2xl font-semibold mb-6 text-center">Réinitialiser le mot de passe</h1>
+        <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+          <input
+            type="password"
+            placeholder="Nouveau mot de passe"
+            value={motDePasse}
+            onChange={(e) => setMotDePasse(e.target.value)}
+            className="border rounded-md p-2"
+            required
+          />
+          <input
+            type="password"
+            placeholder="Confirmer le mot de passe"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            className="border rounded-md p-2"
+            required
+          />
+
+          {message && <p className="text-red-600 text-sm">{message}</p>}
+
+          <button
+            type="submit"
+            className="bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700 transition"
+          >
+            Réinitialiser
+          </button>
+        </form>
+      </div>
+    </main>
+  );
+}

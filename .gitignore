@@ -1,0 +1,47 @@
+# Node
+node_modules/
+npm-debug.log
+pnpm-debug.log
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Env files
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Logs
+logs/
+*.log
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Prisma
+prisma/*.db
+prisma/*.sqlite
+
+# Next.js
+.next/
+.vercel/
+
+# NestJS
+apps/backend/dist/
+apps/backend/node_modules/
+apps/frontend/node_modules/
+
+# Monorepo
+packages/*/node_modules/

@@ -1,0 +1,8 @@
+{
+  "name": "mon-cabinet",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "echo \"Utilise pnpm --filter frontend dev ou pnpm --filter backend start:dev\""
+  }
+}

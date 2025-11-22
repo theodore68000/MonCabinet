@@ -1,0 +1,118 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   PATIENT
+// ──────────────────────────────────────────────────────────────
+//
+
+model Patient {
+  id             Int       @id @default(autoincrement())
+  nom            String
+  prenom         String
+  email          String    @unique
+  motDePasse     String
+  telephone      String?
+  resetToken     String?
+  resetExpires   DateTime?
+  adresse        String?
+  anneeNaissance Int?
+
+  // Relation avec médecin traitant
+  medecinTraitantId Int?
+  medecinTraitant   Medecin? @relation("MedecinTraitant", fields: [medecinTraitantId], references: [id])
+
+  // Relation avec les rendez-vous
+  rdvs RendezVous[] @relation("PatientRdv")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   CABINET (NOUVEAU)
+// ──────────────────────────────────────────────────────────────
+//
+
+model Cabinet {
+  id        Int      @id @default(autoincrement())
+  nom       String
+  adresse   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relation cabinet → médecins
+  medecins Medecin[]
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   MEDECIN
+// ──────────────────────────────────────────────────────────────
+//
+
+model Medecin {
+  id         Int     @id @default(autoincrement())
+  nom        String
+  prenom     String
+  email      String  @unique
+  motDePasse String?
+  telephone  String?
+  specialite String?
+
+  // Nouvelle info cabinet / identité
+  adresseCabinet String?
+  rpps           String?
+
+  // Permettre nouveaux patients
+  accepteNouveauxPatients Boolean @default(true)
+
+  // 🔥 Ajouts 1 → 6
+  statut             String  @default("en_attente")
+  photoUrl           String?
+  horaires           Json?
+  bio                String?
+  typeExercice       String?
+  siret              String?
+  adresseFacturation String?
+
+  // Cabinet (relation)
+  cabinetId Int?
+  cabinet   Cabinet? @relation(fields: [cabinetId], references: [id])
+
+  // Relations patients / rdv
+  patientsTraitant Patient[]    @relation("MedecinTraitant")
+  rdvs             RendezVous[] @relation("MedecinRdv")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   RENDEZVOUS
+// ──────────────────────────────────────────────────────────────
+//
+
+model RendezVous {
+  id     Int      @id @default(autoincrement())
+  date   DateTime
+  heure  String
+  motif  String?
+  statut String   @default("confirmé")
+
+  // Relations
+  patientId Int?
+  medecinId Int?
+
+  patient Patient? @relation("PatientRdv", fields: [patientId], references: [id])
+  medecin Medecin? @relation("MedecinRdv", fields: [medecinId], references: [id])
+}
