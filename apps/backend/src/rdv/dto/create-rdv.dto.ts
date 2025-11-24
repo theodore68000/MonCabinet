@@ -1,8 +1,15 @@
-import { IsInt, IsNotEmpty, IsOptional, IsString } from "class-validator";
+import {
+  IsInt,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsDateString,
+  ValidateIf,
+} from "class-validator";
 
 export class CreateRdvDto {
   @IsNotEmpty()
-  @IsString()
+  @IsDateString()
   date: string; // format YYYY-MM-DD
 
   @IsNotEmpty()
@@ -11,10 +18,12 @@ export class CreateRdvDto {
 
   @IsOptional()
   @IsString()
-  motif?: string;
+  motif?: string | null;
 
+  // Patient peut être null (créneau libre ou bloqué)
+  @ValidateIf((o) => o.patientId !== null && o.patientId !== undefined)
   @IsInt()
-  patientId: number;
+  patientId?: number | null;
 
   @IsInt()
   medecinId: number;

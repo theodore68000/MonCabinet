@@ -3,29 +3,29 @@ import * as nodemailer from 'nodemailer';
 
 @Injectable()
 export class MailService {
-  private transporter: nodemailer.Transporter;
+  private transporter;
 
   constructor() {
-    // logs utiles pour debug
-    // console.log('MAILER ENV', process.env.SMTP_HOST, process.env.SMTP_USER, !!process.env.SMTP_PASS);
-
     this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 2525),
-      secure: false,
+      service: "gmail",
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_PASS,
       },
     });
   }
 
-  async sendMail(to: string, subject: string, html: string) {
-    return this.transporter.sendMail({
-      from: `"Cabinet Médical" <no-reply@moncabinet.com>`,
+  async sendPasswordResetEmail(to: string, resetLink: string) {
+    await this.transporter.sendMail({
+      from: process.env.GMAIL_USER,
       to,
-      subject,
-      html,
+      subject: "Réinitialisation de votre mot de passe",
+      html: `
+        <h2>Réinitialisation du mot de passe</h2>
+        <p>Pour réinitialiser votre mot de passe, cliquez sur le lien ci-dessous :</p>
+        <p><a href="${resetLink}" style="color:blue;font-weight:bold;">Réinitialiser mon mot de passe</a></p>
+        <p>Si vous n'êtes pas à l'origine de cette demande, ignorez simplement cet email.</p>
+      `,
     });
   }
 }

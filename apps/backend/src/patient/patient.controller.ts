@@ -27,6 +27,18 @@ export class PatientController {
     return this.patientService.login(body.email, body.motDePasse);
   }
 
+  // 🔐 MOT DE PASSE OUBLIÉ
+  @Post('forgot-password')
+  async forgotPassword(@Body() body: { email: string }) {
+    return this.patientService.forgotPassword(body.email);
+  }
+
+  // 🔄 RÉINITIALISATION DU MOT DE PASSE
+  @Post('reset-password')
+  async resetPassword(@Body() body: { token: string; motDePasse: string }) {
+    return this.patientService.resetPassword(body.token, body.motDePasse);
+  }
+
   // FIND ALL
   @Get()
   findAll() {
@@ -41,7 +53,10 @@ export class PatientController {
 
   // UPDATE
   @Patch(':id')
-  update(@Param('id') id: string, @Body() updatePatientDto: UpdatePatientDto) {
+  update(
+    @Param('id') id: string,
+    @Body() updatePatientDto: UpdatePatientDto,
+  ) {
     return this.patientService.update(+id, updatePatientDto);
   }
 

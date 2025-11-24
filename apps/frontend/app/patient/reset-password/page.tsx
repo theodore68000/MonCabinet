@@ -1,12 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 export default function ResetPassword() {
   const router = useRouter();
-  const params = useParams();
-  const token = params.token as string;
+  const searchParams = useSearchParams();
+  const token = searchParams.get('token');
 
   const [motDePasse, setMotDePasse] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -16,31 +16,42 @@ export default function ResetPassword() {
     e.preventDefault();
     setMessage('');
 
+    if (!token) {
+      setMessage('Lien invalide ou expiré.');
+      return;
+    }
+
     if (motDePasse !== confirm) {
       setMessage('Les mots de passe ne correspondent pas.');
       return;
     }
 
-    const res = await fetch(`http://localhost:3001/patient/reset-password/${token}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ motDePasse }),
-    });
+    try {
+      const res = await fetch('http://localhost:3001/patient/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, motDePasse }),
+      });
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if (res.ok) {
-      alert('Mot de passe réinitialisé avec succès ✅');
-      router.push('/patient/login');
-    } else {
-      setMessage(data.message || 'Erreur lors de la réinitialisation.');
+      if (res.ok) {
+        alert('Mot de passe réinitialisé avec succès ✅');
+        router.push('/patient/login');
+      } else {
+        setMessage(data.message || 'Erreur lors de la réinitialisation.');
+      }
+    } catch (err) {
+      setMessage('Erreur serveur.');
     }
   };
 
   return (
     <main className="flex items-center justify-center min-h-screen bg-gray-100">
       <div className="bg-white p-8 rounded-xl shadow-md w-96">
-        <h1 className="text-2xl font-semibold mb-6 text-center">Réinitialiser le mot de passe</h1>
+        <h1 className="text-2xl font-semibold mb-6 text-center">
+          Réinitialiser le mot de passe
+        </h1>
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
           <input
             type="password"
@@ -59,7 +70,9 @@ export default function ResetPassword() {
             required
           />
 
-          {message && <p className="text-red-600 text-sm">{message}</p>}
+          {message && (
+            <p className="text-red-600 text-sm text-center">{message}</p>
+          )}
 
           <button
             type="submit"

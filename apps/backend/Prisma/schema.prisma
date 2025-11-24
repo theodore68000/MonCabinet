@@ -25,11 +25,9 @@ model Patient {
   adresse        String?
   anneeNaissance Int?
 
-  // Relation avec médecin traitant
   medecinTraitantId Int?
   medecinTraitant   Medecin? @relation("MedecinTraitant", fields: [medecinTraitantId], references: [id])
 
-  // Relation avec les rendez-vous
   rdvs RendezVous[] @relation("PatientRdv")
 
   createdAt DateTime @default(now())
@@ -38,7 +36,7 @@ model Patient {
 
 //
 // ──────────────────────────────────────────────────────────────
-//   CABINET (NOUVEAU)
+//   CABINET
 // ──────────────────────────────────────────────────────────────
 //
 
@@ -49,8 +47,8 @@ model Cabinet {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relation cabinet → médecins
-  medecins Medecin[]
+  medecins      Medecin[]
+  conversations Conversation[]
 }
 
 //
@@ -68,14 +66,11 @@ model Medecin {
   telephone  String?
   specialite String?
 
-  // Nouvelle info cabinet / identité
   adresseCabinet String?
   rpps           String?
 
-  // Permettre nouveaux patients
   accepteNouveauxPatients Boolean @default(true)
 
-  // 🔥 Ajouts 1 → 6
   statut             String  @default("en_attente")
   photoUrl           String?
   horaires           Json?
@@ -84,13 +79,18 @@ model Medecin {
   siret              String?
   adresseFacturation String?
 
-  // Cabinet (relation)
+  resetToken   String?
+  resetExpires DateTime?
+
   cabinetId Int?
   cabinet   Cabinet? @relation(fields: [cabinetId], references: [id])
 
-  // Relations patients / rdv
   patientsTraitant Patient[]    @relation("MedecinTraitant")
   rdvs             RendezVous[] @relation("MedecinRdv")
+
+  // Nouvelle relation pour la messagerie moderne
+  messages        Message[]
+  conversations   ConversationParticipant[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -109,10 +109,48 @@ model RendezVous {
   motif  String?
   statut String   @default("confirmé")
 
-  // Relations
   patientId Int?
   medecinId Int?
 
   patient Patient? @relation("PatientRdv", fields: [patientId], references: [id])
   medecin Medecin? @relation("MedecinRdv", fields: [medecinId], references: [id])
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   MESSAGERIE — CONVERSATIONS + GROUPES
+// ──────────────────────────────────────────────────────────────
+//
+
+model Conversation {
+  id            Int                       @id @default(autoincrement())
+  name          String?                   // null = conversation privée, non-null = groupe
+  cabinetId     Int
+  cabinet       Cabinet                   @relation(fields: [cabinetId], references: [id])
+  messages      Message[]
+  participants  ConversationParticipant[]
+  createdAt     DateTime                  @default(now())
+}
+
+model ConversationParticipant {
+  id             Int           @id @default(autoincrement())
+  conversationId Int
+  medecinId      Int
+
+  conversation   Conversation  @relation(fields: [conversationId], references: [id])
+  medecin        Medecin       @relation(fields: [medecinId], references: [id])
+
+  @@unique([conversationId, medecinId]) // évite doublon
+}
+
+model Message {
+  id             Int      @id @default(autoincrement())
+  contenu        String
+  createdAt      DateTime @default(now())
+
+  fromId         Int
+  from           Medecin  @relation(fields: [fromId], references: [id])
+
+  conversationId Int
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
 }

@@ -1,10 +1,10 @@
+// src/medecin/dto/create-medecin.dto.ts
 import {
+  IsBoolean,
   IsEmail,
+  IsInt,
   IsOptional,
   IsString,
-  IsBoolean,
-  IsJSON,
-  IsNumber,
 } from 'class-validator';
 
 export class CreateMedecinDto {
@@ -17,9 +17,9 @@ export class CreateMedecinDto {
   @IsEmail()
   email: string;
 
-  @IsOptional()
+  // 🔐 Mot de passe médecin (obligatoire à la création)
   @IsString()
-  motDePasse?: string;
+  motDePasse: string;
 
   @IsOptional()
   @IsString()
@@ -28,8 +28,6 @@ export class CreateMedecinDto {
   @IsOptional()
   @IsString()
   specialite?: string;
-
-  // 🔥 Nouveau champs (1 → 6)
 
   @IsOptional()
   @IsString()
@@ -45,15 +43,14 @@ export class CreateMedecinDto {
 
   @IsOptional()
   @IsString()
-  statut?: string; // en_attente, actif, refuse
+  statut?: string;
 
   @IsOptional()
   @IsString()
   photoUrl?: string;
 
   @IsOptional()
-  @IsJSON()
-  horaires?: any; // JSON
+  horaires?: any; // JSON libre
 
   @IsOptional()
   @IsString()
@@ -72,6 +69,6 @@ export class CreateMedecinDto {
   adresseFacturation?: string;
 
   @IsOptional()
-  @IsNumber()
+  @IsInt()
   cabinetId?: number;
 }

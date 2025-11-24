@@ -12,7 +12,7 @@ export default function Home() {
         </a>
 
         <a
-          href="/medecin/login"
+          href="/medecin/landing"
           className="bg-green-600 text-white px-6 py-3 rounded-lg shadow hover:bg-green-700 text-center"
         >
           Je suis médecin
