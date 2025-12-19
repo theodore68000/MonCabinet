@@ -1,47 +1,99 @@
-# Node
+# =========================
+# Node / Package managers
+# =========================
 node_modules/
-npm-debug.log
-pnpm-debug.log
+**/node_modules/
 
-# Build output
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Lockfiles à INTERDIRE (pnpm only)
+package-lock.json
+**/package-lock.json
+yarn.lock
+
+# pnpm
+.pnpm-debug.log*
+.pnp
+.pnp.*
+
+# =========================
+# Build outputs
+# =========================
 dist/
 build/
 .next/
 out/
+coverage/
 
-# Env files
+apps/backend/dist/
+apps/frontend/.next/
+
+# =========================
+# Environment variables
+# =========================
 .env
-.env.local
-.env.development
-.env.production
-.env.test
+.env.*
+!.env.example
 
+# =========================
 # Logs
+# =========================
 logs/
 *.log
-yarn-debug.log*
-yarn-error.log*
+lerna-debug.log*
 
+# =========================
 # OS files
+# =========================
 .DS_Store
 Thumbs.db
 
-# IDE
+# =========================
+# IDE / Editors
+# =========================
 .vscode/
 .idea/
+.project
+.classpath
+.settings/
+*.sublime-workspace
 
+# =========================
 # Prisma
+# =========================
 prisma/*.db
 prisma/*.sqlite
+apps/backend/prisma/*.db
+apps/backend/prisma/*.sqlite
 
-# Next.js
-.next/
+# ⚠️ IMPORTANT :
+# NE PAS ignorer prisma/migrations
+# NE PAS ignorer schema.prisma
+
+# =========================
+# Next.js / Vercel
+# =========================
 .vercel/
 
-# NestJS
-apps/backend/dist/
-apps/backend/node_modules/
-apps/frontend/node_modules/
-
+# =========================
 # Monorepo
+# =========================
 packages/*/node_modules/
+
+# =========================
+# Temp / runtime
+# =========================
+.tmp
+.temp
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# =========================
+# Diagnostic reports
+# =========================
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
