@@ -16,7 +16,15 @@ export class CabinetService {
   findAll() {
     return this.prisma.cabinet.findMany({
       include: {
-        medecins: true,
+        medecins: {
+          select: {
+            id: true,
+            nom: true,
+            prenom: true,
+            email: true,
+            photoUrl: true,
+          },
+        },
       },
     });
   }
@@ -24,7 +32,17 @@ export class CabinetService {
   findOne(id: number) {
     return this.prisma.cabinet.findUnique({
       where: { id },
-      include: { medecins: true },
+      include: {
+        medecins: {
+          select: {
+            id: true,
+            nom: true,
+            prenom: true,
+            email: true,
+            photoUrl: true,
+          },
+        },
+      },
     });
   }
 

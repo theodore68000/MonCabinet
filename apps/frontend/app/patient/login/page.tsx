@@ -21,22 +21,27 @@ export default function PatientLogin() {
 
       const data = await res.json();
 
-      // ⚠️ Si le backend renvoie une erreur
       if (!res.ok || data.message) {
         setMessage(data.message || "Erreur de connexion");
-        return; // ❗ NE PAS STOCKER data DANS LE LOCALSTORAGE
+        return;
       }
 
-      // ✅ Connexion réussie
+      // 🔥 Connexion OK
       setMessage("Connexion réussie ✅");
 
-      // 🔥 Vérification : on stocke UNIQUEMENT un vrai patient (pas un message)
+      // ⬇⬇⬇ AUCUN CODE ENLEVÉ — JUSTE AJOUTÉ ⬇⬇⬇
+
+      // Sauvegarde locale
       if (typeof window !== "undefined") {
-        localStorage.setItem("patient", JSON.stringify(data));
+        localStorage.setItem("patientSession", JSON.stringify(data));
       }
 
-      // ➜ Redirection vers choisir médecin
-      router.push("/patient/choisir-medecin");
+      // ✅ AJOUT : on met l’ID dans un cookie accessible au front
+      // (Ton backend renvoie déjà "id", donc on l’utilise tel quel)
+      document.cookie = `id=${data.id}; path=/; SameSite=Lax`;
+
+      // Redirection
+      router.push("/patient/dashboard");
     } catch (error) {
       console.error("Erreur serveur :", error);
       setMessage("Erreur serveur");

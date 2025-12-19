@@ -9,6 +9,27 @@ generator client {
 
 //
 // ──────────────────────────────────────────────────────────────
+//   ENUMS
+// ──────────────────────────────────────────────────────────────
+//
+
+enum TypeSlot {
+  HORS
+  PRIS
+  LIBRE
+  BLOQUE
+}
+
+enum PaiementStatus {
+  EN_ATTENTE
+  EN_COURS
+  SUCCES
+  ECHEC
+  REMBOURSE
+}
+
+//
+// ──────────────────────────────────────────────────────────────
 //   PATIENT
 // ──────────────────────────────────────────────────────────────
 //
@@ -23,15 +44,35 @@ model Patient {
   resetToken     String?
   resetExpires   DateTime?
   adresse        String?
-  anneeNaissance Int?
 
-  medecinTraitantId Int?
-  medecinTraitant   Medecin? @relation("MedecinTraitant", fields: [medecinTraitantId], references: [id])
+  // ✅ Stockage STRICT sans fuseau ni heure
+  // Format ISO : YYYY-MM-DD
+  dateNaissance  String
 
-  rdvs RendezVous[] @relation("PatientRdv")
+  emailVerified      Boolean   @default(false)
+  verificationCode   String?
+  verificationExpire DateTime?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  rdvs         RendezVous[] @relation("PatientRdv")
+  documents    Document[]
+  proches      Proche[]
+  paiements    Paiement[] @relation("PatientPaiement")
+
+  formulaires  FormulairePreconsultation[]
+
+  latitude     Float?
+  longitude    Float?
+
+  favoris      PatientFavori[]
+
+  avis         AvisMedecin[]
+
+  notePatient  String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([nom, prenom, dateNaissance])
 }
 
 //
@@ -49,6 +90,7 @@ model Cabinet {
 
   medecins      Medecin[]
   conversations Conversation[]
+  secretaires   Secretaire[]
 }
 
 //
@@ -58,25 +100,29 @@ model Cabinet {
 //
 
 model Medecin {
-  id         Int     @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   nom        String
   prenom     String
-  email      String  @unique
+  email      String   @unique
   motDePasse String?
   telephone  String?
   specialite String?
-
   adresseCabinet String?
   rpps           String?
 
-  accepteNouveauxPatients Boolean @default(true)
+  latitude   Float?
+  longitude  Float?
 
-  statut             String  @default("en_attente")
-  photoUrl           String?
-  horaires           Json?
-  bio                String?
-  typeExercice       String?
-  siret              String?
+  accepteNouveauxPatients Boolean @default(true)
+  statut       String @default("en_attente")
+  photoUrl     String?
+
+  horaires     Json?
+  horairesReference Json?
+
+  bio          String?
+  typeExercice String?
+  siret        String?
   adresseFacturation String?
 
   resetToken   String?
@@ -85,12 +131,23 @@ model Medecin {
   cabinetId Int?
   cabinet   Cabinet? @relation(fields: [cabinetId], references: [id])
 
-  patientsTraitant Patient[]    @relation("MedecinTraitant")
-  rdvs             RendezVous[] @relation("MedecinRdv")
+  rdvs       RendezVous[]
+  messages   Message[]
+  conversations ConversationParticipant[]
+  documents  Document[]
+  secretaires Secretaire[] @relation("MedecinSecretaire")
 
-  // Nouvelle relation pour la messagerie moderne
-  messages        Message[]
-  conversations   ConversationParticipant[]
+  stripeAccountId      String? @unique
+  stripeOnboardingDone Boolean @default(false)
+  paiements Paiement[]
+
+  formulaires FormulairePreconsultation[]
+  avisMedecin   AvisMedecin[]
+  favorisRecus  PatientFavori[]
+
+  patientsCSV MedecinPatientCSV[]
+
+  horairesExceptionnels HorairesExceptionnels[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -98,59 +155,297 @@ model Medecin {
 
 //
 // ──────────────────────────────────────────────────────────────
-//   RENDEZVOUS
+//   HORAIRES EXCEPTIONNELS
+// ──────────────────────────────────────────────────────────────
+//
+
+model HorairesExceptionnels {
+  id        Int      @id @default(autoincrement())
+  medecinId Int
+  date      DateTime
+  horaires  Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  medecin   Medecin @relation(fields: [medecinId], references: [id], onDelete: Cascade)
+
+  @@unique([medecinId, date])
+  @@index([medecinId, date])
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   RENDEZ-VOUS
 // ──────────────────────────────────────────────────────────────
 //
 
 model RendezVous {
-  id     Int      @id @default(autoincrement())
-  date   DateTime
-  heure  String
-  motif  String?
-  statut String   @default("confirmé")
+  id       Int      @id @default(autoincrement())
+  date     DateTime
+  heure    String
+  motif    String?
+
+  typeSlot TypeSlot @default(HORS)
+
+  rappelEnvoye Boolean @default(false)
+
+  typeConsultation String @default("PRESENTIEL")
+  visioRoomName    String?
+  statutVisio      String @default("aucun")
 
   patientId Int?
-  medecinId Int?
+  patient   Patient? @relation("PatientRdv", fields: [patientId], references: [id])
 
-  patient Patient? @relation("PatientRdv", fields: [patientId], references: [id])
-  medecin Medecin? @relation("MedecinRdv", fields: [medecinId], references: [id])
+  procheId  Int?
+  proche    Proche?  @relation("ProcheRdv", fields: [procheId], references: [id])
+
+  medecinId Int?
+  medecin   Medecin? @relation(fields: [medecinId], references: [id])
+
+  paiement   Paiement?
+  formulaire FormulairePreconsultation?
+
+  // ✅ AJOUT — identité patient hors cabinet / CSV
+  patientIdentity Json?
+
+  createdAt DateTime @default(now())
 }
 
 //
 // ──────────────────────────────────────────────────────────────
-//   MESSAGERIE — CONVERSATIONS + GROUPES
+//   FORMULAIRE PRÉ-CONSULTATION
+// ──────────────────────────────────────────────────────────────
+//
+
+model FormulairePreconsultation {
+  id        Int       @id @default(autoincrement())
+
+  rdvId     Int       @unique
+  rdv       RendezVous @relation(fields: [rdvId], references: [id])
+
+  medecinId Int
+  medecin   Medecin    @relation(fields: [medecinId], references: [id])
+
+  patientId Int
+  patient   Patient    @relation(fields: [patientId], references: [id])
+
+  reponses  Json?
+  rempli    Boolean    @default(false)
+
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   DOCUMENTS
+// ──────────────────────────────────────────────────────────────
+//
+
+model Document {
+  id        Int      @id @default(autoincrement())
+  type      String
+  url       String
+  filename  String?
+  createdAt DateTime @default(now())
+
+  medecinId Int
+  medecin   Medecin  @relation(fields: [medecinId], references: [id])
+
+  patientId Int?
+  patient   Patient? @relation(fields: [patientId], references: [id])
+
+  procheId  Int?
+  proche    Proche?  @relation(fields: [procheId], references: [id])
+
+  @@index([patientId])
+  @@index([procheId])
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   MESSAGERIE
 // ──────────────────────────────────────────────────────────────
 //
 
 model Conversation {
-  id            Int                       @id @default(autoincrement())
-  name          String?                   // null = conversation privée, non-null = groupe
-  cabinetId     Int
-  cabinet       Cabinet                   @relation(fields: [cabinetId], references: [id])
-  messages      Message[]
-  participants  ConversationParticipant[]
-  createdAt     DateTime                  @default(now())
+  id           Int                        @id @default(autoincrement())
+  name         String?
+  cabinetId    Int
+  cabinet      Cabinet                    @relation(fields: [cabinetId], references: [id])
+  messages     Message[]
+  participants ConversationParticipant[]
+  createdAt    DateTime                   @default(now())
 }
 
 model ConversationParticipant {
-  id             Int           @id @default(autoincrement())
+  id             Int @id @default(autoincrement())
   conversationId Int
   medecinId      Int
 
-  conversation   Conversation  @relation(fields: [conversationId], references: [id])
-  medecin        Medecin       @relation(fields: [medecinId], references: [id])
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+  medecin      Medecin      @relation(fields: [medecinId], references: [id])
 
-  @@unique([conversationId, medecinId]) // évite doublon
+  @@unique([conversationId, medecinId])
 }
 
 model Message {
-  id             Int      @id @default(autoincrement())
-  contenu        String
-  createdAt      DateTime @default(now())
+  id        Int      @id @default(autoincrement())
+  contenu   String
+  createdAt DateTime @default(now())
 
-  fromId         Int
-  from           Medecin  @relation(fields: [fromId], references: [id])
+  fichiers  Json?
+
+  fromId Int
+  from   Medecin @relation(fields: [fromId], references: [id])
 
   conversationId Int
   conversation   Conversation @relation(fields: [conversationId], references: [id])
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   PROCHES
+// ──────────────────────────────────────────────────────────────
+//
+
+model Proche {
+  id             Int       @id @default(autoincrement())
+  patientId      Int
+  patient        Patient   @relation(fields: [patientId], references: [id])
+
+  prenom         String
+  nom            String
+
+  // ✅ String ISO sans fuseau
+  dateNaissance  String
+
+  relation       String
+  notesSante     String?
+
+  rdvs           RendezVous[] @relation("ProcheRdv")
+  documents      Document[]
+
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([nom, prenom, dateNaissance])
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   SECRETAIRE
+// ──────────────────────────────────────────────────────────────
+//
+
+model Secretaire {
+  id         Int      @id @default(autoincrement())
+  nom        String
+  prenom     String
+  email      String   @unique
+  motDePasse String
+  telephone  String?
+
+  resetToken   String?
+  resetExpires DateTime?
+
+  cabinetId Int
+  cabinet   Cabinet @relation(fields: [cabinetId], references: [id])
+
+  medecins  Medecin[] @relation("MedecinSecretaire")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   AUDIT LOG
+// ──────────────────────────────────────────────────────────────
+//
+
+model AuditLog {
+  id          Int       @id @default(autoincrement())
+  userId      Int?
+  role        String
+  action      String
+  targetType  String?
+  targetId    Int?
+  ip          String?
+  success     Boolean
+  timestamp   DateTime   @default(now())
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   PAIEMENT
+// ──────────────────────────────────────────────────────────────
+//
+
+model Paiement {
+  id                    Int       @id @default(autoincrement())
+  montantCents          Int
+  devise                String    @default("eur")
+
+  status                PaiementStatus @default(EN_ATTENTE)
+
+  stripePaymentIntentId String    @unique
+  stripeChargeId        String?
+  platformFeeCents      Int       @default(0)
+
+  patientId             Int?
+  patient               Patient?   @relation("PatientPaiement", fields: [patientId], references: [id])
+
+  medecinId             Int
+  medecin               Medecin    @relation(fields: [medecinId], references: [id])
+
+  rendezVousId          Int        @unique
+  rendezVous            RendezVous @relation(fields: [rendezVousId], references: [id])
+
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+}
+
+//
+// ──────────────────────────────────────────────────────────────
+//   FAVORIS & AVIS
+// ──────────────────────────────────────────────────────────────
+//
+
+model PatientFavori {
+  id        Int      @id @default(autoincrement())
+  patientId Int
+  patient   Patient  @relation(fields: [patientId], references: [id])
+  medecinId Int
+  medecin   Medecin  @relation(fields: [medecinId], references: [id])
+  createdAt DateTime @default(now())
+  @@unique([patientId, medecinId])
+}
+
+model AvisMedecin {
+  id          Int      @id @default(autoincrement())
+  patientId   Int
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  medecinId   Int
+  medecin     Medecin  @relation(fields: [medecinId], references: [id])
+  note        Float
+  commentaire String?
+  createdAt   DateTime @default(now())
+  @@unique([patientId, medecinId])
+}
+
+model MedecinPatientCSV {
+  id            Int      @id @default(autoincrement())
+  medecinId     Int
+  nom           String
+  prenom        String
+
+  // ✅ String ISO sans fuseau
+  dateNaissance String
+
+  medecin     Medecin  @relation(fields: [medecinId], references: [id])
+
+  @@index([medecinId])
+  @@index([nom, prenom, dateNaissance])
 }

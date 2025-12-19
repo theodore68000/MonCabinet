@@ -1,30 +1,69 @@
 import {
-  IsInt,
   IsNotEmpty,
   IsOptional,
   IsString,
   IsDateString,
-  ValidateIf,
-} from "class-validator";
+  IsIn,
+  IsInt,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
+
+class PatientIdentityDto {
+  @IsNotEmpty()
+  @IsIn(['CSV', 'HORS'])
+  source: 'CSV' | 'HORS';
+
+  @IsOptional()
+  @IsString()
+  nom?: string;
+
+  @IsOptional()
+  @IsString()
+  prenom?: string;
+
+  // JJ/MM/AAAA (pas ISO)
+  @IsOptional()
+  @IsString()
+  dateNaissance?: string;
+}
 
 export class CreateRdvDto {
   @IsNotEmpty()
   @IsDateString()
-  date: string; // format YYYY-MM-DD
+  date: string;
 
   @IsNotEmpty()
   @IsString()
-  heure: string; // format HH:mm
+  heure: string;
 
   @IsOptional()
   @IsString()
   motif?: string | null;
 
-  // Patient peut être null (créneau libre ou bloqué)
-  @ValidateIf((o) => o.patientId !== null && o.patientId !== undefined)
+  @IsOptional()
   @IsInt()
   patientId?: number | null;
 
+  @IsOptional()
+  @IsInt()
+  procheId?: number | null;
+
+  @IsNotEmpty()
   @IsInt()
   medecinId: number;
+
+  @IsOptional()
+  @IsIn(['PRESENTIEL', 'VISIO'])
+  typeConsultation?: 'PRESENTIEL' | 'VISIO';
+
+  @IsOptional()
+  @IsIn(['LIBRE', 'PRIS', 'BLOQUE', 'HORS'])
+  typeSlot?: 'LIBRE' | 'PRIS' | 'BLOQUE' | 'HORS';
+
+  // ✅ AJOUT — identité patient (CSV ou HORS)
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => PatientIdentityDto)
+  patientIdentity?: PatientIdentityDto;
 }

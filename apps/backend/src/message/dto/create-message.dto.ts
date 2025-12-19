@@ -1,4 +1,3 @@
-// apps/backend/src/message/dto/create-message.dto.ts
 import { IsInt, IsString } from 'class-validator';
 
 export class CreateMessageDto {

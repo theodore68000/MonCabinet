@@ -7,25 +7,40 @@ export class MailService {
 
   constructor() {
     this.transporter = nodemailer.createTransport({
-      service: "gmail",
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
       auth: {
         user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_PASS,
+        pass: process.env.GMAIL_PASS, // mot de passe d'application Google
       },
     });
   }
 
-  async sendPasswordResetEmail(to: string, resetLink: string) {
-    await this.transporter.sendMail({
-      from: process.env.GMAIL_USER,
+  // Méthode générique → utilisée par NotificationService
+  async send(to: string, subject: string, html: string) {
+    return this.transporter.sendMail({
+      from: `"MonCabinet" <${process.env.GMAIL_USER}>`,
       to,
-      subject: "Réinitialisation de votre mot de passe",
-      html: `
-        <h2>Réinitialisation du mot de passe</h2>
-        <p>Pour réinitialiser votre mot de passe, cliquez sur le lien ci-dessous :</p>
-        <p><a href="${resetLink}" style="color:blue;font-weight:bold;">Réinitialiser mon mot de passe</a></p>
-        <p>Si vous n'êtes pas à l'origine de cette demande, ignorez simplement cet email.</p>
-      `,
+      subject,
+      html,
     });
+  }
+
+  // Email reset mot de passe
+  async sendPasswordResetEmail(to: string, resetLink: string) {
+    const html = `
+      <h2>Réinitialisation de votre mot de passe</h2>
+      <p>Pour réinitialiser votre mot de passe, cliquez ici :</p>
+      <p>
+        <a href="${resetLink}" 
+           style="font-size:16px;color:#2563eb;font-weight:bold">
+          Réinitialiser mon mot de passe
+        </a>
+      </p>
+      <p>Si vous n'avez pas demandé ce changement, ignorez cet email.</p>
+    `;
+
+    return this.send(to, 'Réinitialisation du mot de passe', html);
   }
 }

@@ -1,4 +1,10 @@
-import { IsEmail, IsOptional, IsString, IsInt } from 'class-validator';
+import {
+  IsEmail,
+  IsOptional,
+  IsString,
+  IsInt,
+  Matches,
+} from 'class-validator';
 
 export class CreatePatientDto {
   @IsString()
@@ -10,8 +16,9 @@ export class CreatePatientDto {
   @IsEmail()
   email: string;
 
+  @IsOptional()
   @IsString()
-  motDePasse: string;
+  motDePasse?: string;
 
   @IsOptional()
   @IsString()
@@ -21,9 +28,22 @@ export class CreatePatientDto {
   @IsString()
   adresse?: string;
 
+  /**
+   * ❌ Déprécié – conservé pour compat éventuelle
+   */
   @IsOptional()
   @IsInt()
   anneeNaissance?: number;
+
+  /**
+   * ✅ Format API attendu : dd/mm/yyyy
+   * → sera converti en YYYY-MM-DD côté service
+   */
+  @IsString()
+  @Matches(/^\d{2}\/\d{2}\/\d{4}$/, {
+    message: 'dateNaissance doit être au format dd/mm/yyyy',
+  })
+  dateNaissance: string;
 
   @IsOptional()
   @IsInt()

@@ -1,27 +1,40 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export type ModalMode = "dayButton" | "weekButton" | "click";
 
 type Props = {
   open: boolean;
   onClose: (refresh: boolean) => void;
+
   medecinId?: number;
-  date: string; // "YYYY-MM-DD"
-  heure: string; // "HH:MM" ou ""
+
+  date: string;
+  heure: string;
   mode: ModalMode;
 
-  // Quand on clique sur un slot qui a déjà un RDV
   rdvId?: number | null;
-  initialPatientId?: number | null;
+
+  initialTypeConsultation?: string | null;
 };
 
-type Patient = {
+type CsvPatient = {
   id: number;
   nom: string;
   prenom: string;
+  dateNaissance: string;
 };
+
+type PatientMode = "none" | "csv" | "hors";
+
+const normalize = (v: string) =>
+  (v ?? "")
+    .toString()
+    .trim()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
 
 export default function AddSlotModal({
   open,
@@ -31,296 +44,389 @@ export default function AddSlotModal({
   heure,
   mode,
   rdvId,
-  initialPatientId,
+  initialTypeConsultation,
 }: Props) {
-  const [patients, setPatients] = useState<Patient[]>([]);
-  const [localDate, setLocalDate] = useState<string>(date);
-  const [localHeure, setLocalHeure] = useState<string>(heure);
-  const [patientId, setPatientId] = useState<string>("");
-  const [error, setError] = useState<string>("");
+  /* -------------------------------------------------------
+     STATE
+  ------------------------------------------------------- */
+  const [patientMode, setPatientMode] = useState<PatientMode>("none");
+
+  // CSV
+  const [csvPatients, setCsvPatients] = useState<CsvPatient[]>([]);
+  const [csvSearch, setCsvSearch] = useState("");
+  const [selectedCsvPatient, setSelectedCsvPatient] =
+    useState<CsvPatient | null>(null);
+  const [csvLoaded, setCsvLoaded] = useState(false);
+
+  // Hors cabinet
+  const [horsNom, setHorsNom] = useState("");
+  const [horsPrenom, setHorsPrenom] = useState("");
+
+  // Date / heure
+  const [localDate, setLocalDate] = useState(date);
+  const [localHeure, setLocalHeure] = useState(heure);
+
+  const [typeConsultation, setTypeConsultation] = useState<
+    "PRESENTIEL" | "VISIO"
+  >(initialTypeConsultation === "VISIO" ? "VISIO" : "PRESENTIEL");
+
+  const [error, setError] = useState("");
 
   const isEdit = !!rdvId;
 
+  /* -------------------------------------------------------
+     INIT RESET
+  ------------------------------------------------------- */
   useEffect(() => {
     if (!open) return;
 
-    const fetchPatients = async () => {
-      try {
-        const res = await fetch("http://localhost:3001/patient");
-        const data = await res.json();
-        setPatients(data);
-      } catch {
-        setPatients([]);
-      }
-    };
-
     setLocalDate(date);
     setLocalHeure(heure);
-    setPatientId(initialPatientId ? String(initialPatientId) : "");
+    setTypeConsultation(
+      initialTypeConsultation === "VISIO" ? "VISIO" : "PRESENTIEL"
+    );
+
+    setPatientMode("none");
+    setCsvSearch("");
+    setSelectedCsvPatient(null);
     setError("");
-    fetchPatients();
-  }, [open, date, heure, initialPatientId]);
+    setHorsNom("");
+    setHorsPrenom("");
+    setCsvLoaded(false);
+  }, [open, date, heure, initialTypeConsultation]);
 
-  const formatDate = (d: string) => {
-    if (!d) return "";
-    const obj = new Date(d);
-    return obj.toLocaleDateString("fr-FR", {
-      weekday: "long",
-      day: "2-digit",
-      month: "long",
-    });
-  };
+  /* -------------------------------------------------------
+     CSV AUTOCOMPLETE
+  ------------------------------------------------------- */
+  useEffect(() => {
+    if (!open) return;
+    if (patientMode !== "csv") return;
+    if (!medecinId) return;
 
-  const computeFinalDateHeure = () => {
-    let finalDate = date;
-    let finalHeure = heure;
-
-    if (mode === "weekButton") {
-      finalDate = localDate;
-      finalHeure = localHeure;
-    } else if (mode === "dayButton") {
-      finalDate = date;
-      finalHeure = localHeure;
-    } else if (mode === "click") {
-      finalDate = date;
-      finalHeure = heure;
-    }
-
-    return { finalDate, finalHeure };
-  };
-
-  const handleCreateOrUpdate = async () => {
-    if (!medecinId) {
-      setError("Médecin introuvable.");
+    const q = csvSearch.trim();
+    if (q.length < 2) {
+      setCsvPatients([]);
       return;
     }
+
+    const controller = new AbortController();
+
+    fetch(
+      `http://localhost:3001/medecin/${medecinId}/patients-csv?query=${encodeURIComponent(
+        q
+      )}`,
+      { signal: controller.signal }
+    )
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data) => {
+        setCsvPatients(Array.isArray(data) ? data : []);
+      })
+      .catch(() => {
+        setCsvPatients([]);
+      });
+
+    return () => controller.abort();
+  }, [open, patientMode, medecinId, csvSearch]);
+
+  /* -------------------------------------------------------
+     HELPERS
+  ------------------------------------------------------- */
+  const computeFinalDateHeure = () => {
+    if (mode === "weekButton")
+      return { finalDate: localDate, finalHeure: localHeure };
+    if (mode === "dayButton")
+      return { finalDate: date, finalHeure: localHeure };
+    return { finalDate: date, finalHeure: heure };
+  };
+
+  const filteredCsvPatients = useMemo(() => {
+    if (patientMode !== "csv") return [];
+    return csvPatients;
+  }, [patientMode, csvPatients]);
+
+  /* -------------------------------------------------------
+     CREATE / UPDATE (FIX ICI)
+  ------------------------------------------------------- */
+  const handleCreateOrUpdate = async () => {
+    if (!medecinId) return setError("Médecin introuvable.");
 
     const { finalDate, finalHeure } = computeFinalDateHeure();
+    if (!finalDate || !finalHeure)
+      return setError("Date et heure obligatoires.");
 
-    if (!finalDate || !finalHeure) {
-      setError("Merci de renseigner la date et l'heure.");
-      return;
+    if (patientMode === "csv" && !selectedCsvPatient)
+      return setError("Sélectionnez un patient du médecin.");
+
+    if (patientMode === "hors" && (!horsNom || !horsPrenom))
+      return setError("Nom et prénom requis (hors cabinet).");
+
+    setError("");
+
+    // ----------------------------
+    // Payload commun (FIX typeSlot)
+    // ----------------------------
+    const payload: any = {
+      medecinId,
+      date: finalDate,
+      heure: finalHeure,
+      typeSlot: patientMode === "none" ? "LIBRE" : "PRIS",
+      typeConsultation,
+    };
+
+    // ----------------------------
+    // Identité patient
+    // ----------------------------
+    if (patientMode === "csv" && selectedCsvPatient) {
+      payload.patientId = selectedCsvPatient.id;
+      payload.patientIdentity = {
+        source: "CSV",
+        nom: selectedCsvPatient.nom,
+        prenom: selectedCsvPatient.prenom,
+        dateNaissance: selectedCsvPatient.dateNaissance,
+      };
+    }
+
+    if (patientMode === "hors") {
+      payload.patientIdentity = {
+        source: "HORS",
+        nom: horsNom,
+        prenom: horsPrenom,
+      };
     }
 
     try {
-      const hasPatient = !!patientId;
+const res = await fetch(
+  "http://localhost:3001/rdv/upload/medecin",
+  {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }
+);
 
-      // ───────────── UPDATE EXISTANT ─────────────
-      if (isEdit && rdvId) {
-        const body: any = {
-          medecinId,
-          date: finalDate,
-          heure: finalHeure,
-        };
-
-        if (hasPatient) {
-          body.patientId = Number(patientId);
-          body.statut = "confirmé";
-          body.motif = "Consultation";
-        } else {
-          // Créneau libre explicite
-          body.patientId = null;
-          body.statut = "disponible";
-          body.motif = null;
-        }
-
-        const res = await fetch(`http://localhost:3001/rdv/${rdvId}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-
-        if (!res.ok) {
-          const data = await res.json().catch(() => null);
-          setError(
-            data?.message || "Erreur lors de la mise à jour du créneau.",
-          );
-          return;
-        }
-
-        onClose(true);
-        return;
-      }
-
-      // ───────────── CREATION NOUVEAU ─────────────
-      if (hasPatient) {
-        // Création d'un rendez-vous avec patient
-        const res = await fetch("http://localhost:3001/rdv", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            medecinId,
-            patientId: Number(patientId),
-            date: finalDate,
-            heure: finalHeure,
-            motif: "Consultation",
-          }),
-        });
-
-        if (!res.ok) {
-          const data = await res.json().catch(() => null);
-          setError(
-            data?.message || "Erreur lors de la création du rendez-vous.",
-          );
-          return;
-        }
-      } else {
-        // Création d'un créneau libre
-        const res = await fetch("http://localhost:3001/rdv/slot", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            medecinId,
-            date: finalDate,
-            heure: finalHeure,
-          }),
-        });
-
-        if (!res.ok) {
-          const data = await res.json().catch(() => null);
-          setError(
-            data?.message ||
-              "Erreur lors de la création du créneau libre.",
-          );
-          return;
-        }
-      }
-
-      onClose(true);
-    } catch {
-      setError("Erreur lors de l'enregistrement du créneau.");
-    }
-  };
-
-  // Supprimer = bloquer le créneau (statut = indisponible)
-  const handleDelete = async () => {
-    if (!rdvId) return;
-    try {
-      const res = await fetch(`http://localhost:3001/rdv/${rdvId}`, {
-        method: "DELETE",
-      });
 
       if (!res.ok) {
         const data = await res.json().catch(() => null);
-        setError(
-          data?.message || "Erreur lors de la suppression du créneau.",
-        );
-        return;
+        return setError(data?.message || "Erreur lors de l'enregistrement.");
       }
 
       onClose(true);
     } catch {
-      setError("Erreur lors de la suppression du créneau.");
+      setError("Erreur serveur.");
     }
   };
 
+  /* -------------------------------------------------------
+     BLOCK EMPTY SLOT
+  ------------------------------------------------------- */
+  const handleBlockEmptySlot = async () => {
+    if (!medecinId) return setError("Médecin introuvable.");
+
+    const { finalDate, finalHeure } = computeFinalDateHeure();
+
+    try {
+      const res = await fetch("http://localhost:3001/rdv/slot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          medecinId,
+          date: finalDate,
+          heure: finalHeure,
+          typeSlot: "BLOQUE",
+        }),
+      });
+
+      if (!res.ok) return setError("Impossible de bloquer ce créneau.");
+
+      onClose(true);
+    } catch {
+      setError("Erreur serveur.");
+    }
+  };
+
+
+
+
+
+  /* -------------------------------------------------------
+     RENDER: POP-UP overlay (comme avant)
+  ------------------------------------------------------- */
   if (!open) return null;
 
-  const isClickMode = mode === "click";
-
-  const title = isEdit
-    ? initialPatientId
-      ? "Modifier le rendez-vous"
-      : "Créneau libre"
-    : "Ajouter un rendez-vous";
-
-  const firstOptionLabel = isEdit
-    ? "Laisser libre"
-    : "Aucun patient (créneau libre)";
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-slate-900 p-6 rounded-xl w-96 space-y-4 border border-slate-700 shadow-xl">
-        <h2 className="text-xl font-bold text-emerald-400">{title}</h2>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-slate-900 p-6 rounded-xl w-[520px] max-w-[90vw] space-y-4 border border-slate-700 shadow-xl">
+        <h2 className="text-xl font-bold text-emerald-400">
+          Ajouter un créneau ou un rendez-vous
+        </h2>
 
-        {/* Date / heure selon le mode */}
-        {mode === "dayButton" && (
+        <div className="text-sm text-slate-200 space-y-1">
+          <div>
+            <span className="text-slate-400">Date :</span>{" "}
+            {mode === "weekButton" ? localDate : date}
+          </div>
+          <div>
+            <span className="text-slate-400">Heure :</span>{" "}
+            {mode === "click" ? heure : localHeure}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="font-semibold text-sm text-slate-100">Patient</p>
+          <div className="flex gap-2 text-xs">
+            {[
+              ["none", "Aucun"],
+              ["csv", "Patient du médecin (CSV)"],
+              ["hors", "Hors cabinet"],
+            ].map(([k, label]) => (
+              <button
+                key={k}
+                onClick={() => {
+                  setPatientMode(k as PatientMode);
+                  setError("");
+
+                  if (k !== "csv") {
+                    setCsvSearch("");
+                    setSelectedCsvPatient(null);
+                  }
+
+                  if (k === "csv") {
+                    // on ne reset pas csvPatients (on garde le cache),
+                    // mais on reset la sélection et la recherche
+                    setCsvSearch("");
+                    setSelectedCsvPatient(null);
+                  }
+
+                  if (k !== "hors") {
+                    setHorsNom("");
+                    setHorsPrenom("");
+                  }
+                }}
+                className={`flex-1 px-2 py-1 rounded ${
+                  patientMode === k
+                    ? "bg-emerald-500 text-black"
+                    : "bg-slate-800 text-slate-100"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* CSV autocomplete (fix) */}
+        {patientMode === "csv" && (
           <>
-            <p className="text-sm text-slate-300">
-              Date :{" "}
-              <span className="font-semibold">{formatDate(date)}</span>
-            </p>
             <input
-              type="time"
-              className="w-full p-2 rounded bg-slate-800 border border-slate-700"
-              value={localHeure}
-              onChange={(e) => setLocalHeure(e.target.value)}
+              placeholder="Rechercher par nom / prénom / date"
+              value={csvSearch}
+              onChange={(e) => {
+                setCsvSearch(e.target.value);
+                setSelectedCsvPatient(null);
+                setError("");
+              }}
+              className="w-full p-2 rounded bg-slate-800 border border-slate-700 text-sm text-slate-100"
             />
+
+            <div className="max-h-32 overflow-y-auto space-y-1">
+              {filteredCsvPatients.length === 0 ? (
+                <p className="text-xs text-slate-400 italic px-2">
+                  Aucun résultat
+                </p>
+              ) : (
+                filteredCsvPatients.map((p, i) => {
+                  const selected =
+                    selectedCsvPatient?.nom === p.nom &&
+                    selectedCsvPatient?.prenom === p.prenom &&
+                    selectedCsvPatient?.dateNaissance === p.dateNaissance;
+
+                  return (
+                    <button
+                      key={`${p.nom}-${p.prenom}-${p.dateNaissance}-${i}`}
+                      onClick={() => {
+                        setSelectedCsvPatient(p);
+                        setError("");
+                      }}
+                      className={`w-full text-left px-2 py-1 text-xs rounded text-slate-100 transition
+                        ${
+                          selected
+                            ? "bg-emerald-500/20 border border-emerald-400 shadow-inner"
+                            : "bg-slate-800 hover:bg-slate-700"
+                        }`}
+                    >
+                      {p.prenom} {p.nom} — {p.dateNaissance}
+                    </button>
+                  );
+                })
+              )}
+            </div>
           </>
         )}
 
-        {mode === "weekButton" && (
-          <>
+        {/* Hors cabinet */}
+        {patientMode === "hors" && (
+          <div className="space-y-2 text-sm">
             <input
-              type="date"
-              className="w-full p-2 rounded bg-slate-800 border border-slate-700"
-              value={localDate}
-              onChange={(e) => setLocalDate(e.target.value)}
+              placeholder="Nom"
+              value={horsNom}
+              onChange={(e) => setHorsNom(e.target.value)}
+              className="w-full p-2 bg-slate-800 rounded border border-slate-700 text-slate-100"
             />
             <input
-              type="time"
-              className="w-full p-2 rounded bg-slate-800 border border-slate-700"
-              value={localHeure}
-              onChange={(e) => setLocalHeure(e.target.value)}
+              placeholder="Prénom"
+              value={horsPrenom}
+              onChange={(e) => setHorsPrenom(e.target.value)}
+              className="w-full p-2 bg-slate-800 rounded border border-slate-700 text-slate-100"
             />
-          </>
-        )}
-
-        {isClickMode && (
-          <div className="space-y-1 text-sm text-slate-300">
-            <p>
-              Date :{" "}
-              <span className="font-semibold">{formatDate(date)}</span>
-            </p>
-            <p>
-              Heure : <span className="font-semibold">{heure}</span>
-            </p>
           </div>
         )}
 
-        {/* Patient */}
-        <select
-          className="w-full p-2 bg-slate-800 border border-slate-700 rounded"
-          value={patientId}
-          onChange={(e) => setPatientId(e.target.value)}
-        >
-          <option value="">{firstOptionLabel}</option>
-          {patients.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.prenom} {p.nom}
-            </option>
-          ))}
-        </select>
-
-        {error && (
-          <p className="text-red-400 text-xs mt-1 text-center">
-            {error}
-          </p>
+        {/* Type consultation */}
+        {patientMode !== "none" && (
+          <div className="space-y-1 text-sm text-slate-100">
+            <p className="font-semibold">Type de consultation</p>
+            <label>
+              <input
+                type="radio"
+                checked={typeConsultation === "PRESENTIEL"}
+                onChange={() => setTypeConsultation("PRESENTIEL")}
+              />{" "}
+              Cabinet
+            </label>
+            <label className="ml-4">
+              <input
+                type="radio"
+                checked={typeConsultation === "VISIO"}
+                onChange={() => setTypeConsultation("VISIO")}
+              />{" "}
+              Visio
+            </label>
+          </div>
         )}
 
-        <div className="flex justify-between items-center pt-3">
-          {isEdit ? (
+        {error && <p className="text-red-400 text-xs">{error}</p>}
+
+        {/* Actions */}
+        <div className="flex justify-between pt-2">
+          {!isEdit && (
             <button
-              onClick={handleDelete}
-              className="bg-red-600 hover:bg-red-500 text-sm font-semibold px-4 py-2 rounded"
+              onClick={handleBlockEmptySlot}
+              className="bg-red-600 px-3 py-2 rounded text-sm font-semibold text-white"
             >
-              Supprimer le créneau
+              Bloquer
             </button>
-          ) : (
-            <span />
           )}
 
           <div className="flex gap-2">
             <button
               onClick={() => onClose(false)}
-              className="text-slate-400 px-4 py-2 text-sm"
+              className="text-slate-400 px-3 py-2"
             >
               Annuler
             </button>
-
             <button
               onClick={handleCreateOrUpdate}
-              className="bg-emerald-500 px-4 py-2 rounded text-black font-bold hover:bg-emerald-400 text-sm"
+              className="bg-emerald-500 px-4 py-2 rounded font-bold text-black"
             >
               Valider
             </button>

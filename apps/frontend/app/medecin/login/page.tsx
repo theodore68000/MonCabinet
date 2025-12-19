@@ -5,10 +5,8 @@ import { useRouter } from "next/navigation";
 
 export default function MedecinAuthLogin() {
   const router = useRouter();
-
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
   const [error, setError] = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -16,14 +14,17 @@ export default function MedecinAuthLogin() {
     setError("");
 
     try {
-      const res = await fetch("http://localhost:3001/medecin/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          motDePasse: password,
-        }),
-      });
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/medecin/login`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email,
+            motDePasse: password,
+          }),
+        }
+      );
 
       const data = await res.json();
 
@@ -32,79 +33,81 @@ export default function MedecinAuthLogin() {
         return;
       }
 
-      // ⬅️ Correction : forcer string
-      localStorage.setItem(
-  "medecinSession",
-  JSON.stringify({
-    id: data.medecin.id,
-    nom: data.medecin.nom,
-    prenom: data.medecin.prenom,
-    email: data.medecin.email,
-    telephone: data.medecin.telephone,
-    specialite: data.medecin.specialite,
-    adresseCabinet: data.medecin.adresseCabinet,
-    rpps: data.medecin.rpps,
-    siret: data.medecin.siret,
-  })
-);
+      const session = {
+        id: data.medecin.id,
+        nom: data.medecin.nom,
+        prenom: data.medecin.prenom,
+        email: data.medecin.email,
+        telephone: data.medecin.telephone,
+        specialite: data.medecin.specialite,
+        photoUrl: data.medecin.photoUrl,
+      };
 
+      localStorage.setItem("medecinSession", JSON.stringify(session));
 
       router.push("/medecin/dashboard");
-    } catch (err) {
-      setError("Erreur serveur, réessayez plus tard.");
+    } catch {
+      setError("Erreur serveur");
     }
   };
 
-return (
-  <div className="min-h-screen bg-slate-950 flex items-center justify-center px-4">
-    <div className="w-full max-w-md bg-slate-900 rounded-xl p-6 shadow-lg border border-slate-800">
+  return (
+    <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+      <div className="bg-slate-900 p-6 rounded-xl w-full max-w-md border border-slate-800">
+        <h1 className="text-2xl font-bold text-emerald-400 mb-4 text-center">
+          Connexion médecin
+        </h1>
 
-      <h1 className="text-2xl font-bold text-emerald-400 text-center mb-6">
-        Connexion médecin
-      </h1>
+        {error && (
+          <p className="text-red-400 text-sm text-center mb-3">{error}</p>
+        )}
 
-      {error && (
-        <p className="text-red-400 text-center text-sm mb-3">{error}</p>
-      )}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <input
+            type="email"
+            className="w-full p-3 bg-slate-800 rounded-lg border border-slate-600 text-white"
+            placeholder="Email"
+            required
+            onChange={(e) => setEmail(e.target.value)}
+          />
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <input
-          type="email"
-          placeholder="Email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          className="w-full p-3 rounded-lg bg-slate-800 text-white border border-slate-600"
-          required
-        />
+          <input
+            type="password"
+            className="w-full p-3 bg-slate-800 rounded-lg border border-slate-600 text-white"
+            placeholder="Mot de passe"
+            required
+            onChange={(e) => setPassword(e.target.value)}
+          />
 
-        <input
-          type="password"
-          placeholder="Mot de passe"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="w-full p-3 rounded-lg bg-slate-800 text-white border border-slate-600"
-          required
-        />
+          <button
+            type="submit"
+            className="w-full p-3 bg-emerald-500 rounded-lg font-bold text-black hover:bg-emerald-400 transition"
+          >
+            Se connecter
+          </button>
+        </form>
 
-        <button
-          type="submit"
-          className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold py-3 rounded-lg"
-        >
-          Se connecter
-        </button>
-      </form>
+        {/* --------------------------- */}
+        {/*  Liens supplémentaires      */}
+        {/* --------------------------- */}
+        <div className="mt-4 text-center space-y-2">
+          <button
+            className="text-emerald-400 hover:text-emerald-300 text-sm"
+            onClick={() => router.push("/medecin/forgot-password")}
+          >
+            Mot de passe oublié ?
+          </button>
 
-      {/* 🔥 Lien mot de passe oublié */}
-      <div className="text-center mt-4">
-        <a
-          href="/medecin/forgot-password"
-          className="text-emerald-400 text-sm hover:text-emerald-300 transition"
-        >
-          Mot de passe oublié ?
-        </a>
+          <div>
+            <button
+              className="text-slate-400 hover:text-slate-300 text-sm"
+              onClick={() => router.push("/secretaire/login")}
+            >
+              Je suis secrétaire
+            </button>
+          </div>
+        </div>
       </div>
-
     </div>
-  </div>
-);
+  );
 }

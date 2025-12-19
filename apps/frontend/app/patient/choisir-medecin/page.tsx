@@ -1,135 +1,190 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState } from "react";
+import AddFavoriInput from "./components/AddFavoriInput";
+import FavorisList from "./components/FavorisList";
+import FiltersForm from "./components/FiltersForm";
+import MedecinCard from "./components/MedecinCard";
+import { useRouter } from "next/navigation";
 
-interface Medecin {
-  id: number;
-  nom: string;
-  prenom: string;
-  specialite: string;
-  accepteNouveauxPatients: boolean;
-}
+// 🔧 AJOUT : normalisation texte (accents + casse)
+const normalizeText = (v: string) =>
+  v
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 
-interface Patient {
-  id: number;
-  nom: string;
-  prenom: string;
-  email: string;
-  medecinTraitantId?: number | null;
-}
-
-export default function ChoisirMedecin() {
-  const [medecins, setMedecins] = useState<Medecin[]>([]);
-  const [search, setSearch] = useState('');
-  const [selectedMedecin, setSelectedMedecin] = useState<Medecin | null>(null);
-  const [patient, setPatient] = useState<Patient | null>(null);
+export default function ChoisirMedecinPage() {
   const router = useRouter();
 
-  // Charger le patient depuis localStorage
+  // ------------------------------
+  // ⭐ FAVORIS SAFE LOCAL STORAGE
+  // ------------------------------
+  const [favoris, setFavoris] = useState<any[]>([]);
+  const [loaded, setLoaded] = useState(false);
+
   useEffect(() => {
-    const local = localStorage.getItem('patient');
-    if (local) {
-      setPatient(JSON.parse(local));
+    const stored = localStorage.getItem("favorisMedecins");
+    if (stored) {
+      try {
+        setFavoris(JSON.parse(stored));
+      } catch {}
+    }
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    localStorage.setItem("favorisMedecins", JSON.stringify(favoris));
+  }, [favoris, loaded]);
+
+  // 🔧 AJOUT : éviter doublons accents/casse
+  const addFavori = (m: any) => {
+    setFavoris((prev) => {
+      if (
+        prev.some(
+          (f) =>
+            f.id === m.id ||
+            normalizeText(`${f.prenom} ${f.nom}`) ===
+              normalizeText(`${m.prenom} ${m.nom}`)
+        )
+      ) {
+        return prev;
+      }
+      return [...prev, m];
+    });
+  };
+
+  const removeFavori = (id: number) => {
+    setFavoris((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  // ------------------------------
+  // ⭐ PATIENT COURANT
+  // ------------------------------
+  const [patient, setPatient] = useState<any>(null);
+
+  useEffect(() => {
+    const p =
+      localStorage.getItem("patient") ??
+      localStorage.getItem("patientSession");
+
+    if (!p) return;
+
+    try {
+      const parsed = JSON.parse(p);
+      parsed.id = Number(parsed.id);
+      setPatient(parsed);
+    } catch {
+      localStorage.removeItem("patient");
+      localStorage.removeItem("patientSession");
     }
   }, []);
 
-  // Charger les médecins depuis le backend
+  // ------------------------------
+  // ⭐ RÉSULTATS À DROITE
+  // ------------------------------
+  const [filters, setFilters] = useState<any>(null);
+  const [results, setResults] = useState<any[]>([]);
+
   useEffect(() => {
-    fetch('http://localhost:3001/medecin')
-      .then((res) => res.json())
-      .then((data) => setMedecins(data))
-      .catch((err) => console.error('Erreur chargement médecins :', err));
-  }, []);
+    if (!filters) return;
+    (async () => {
+      const params = new URLSearchParams(filters).toString();
+      const res = await fetch(`/api/search-medecins?${params}`);
+      const data = await res.json();
+      setResults(data.medecins || []);
+    })();
+  }, [filters]);
 
-  // Filtrer selon la recherche
-  const filtered = medecins.filter((m) => {
-    const term = search.toLowerCase();
-    return (
-      m.nom.toLowerCase().includes(term) ||
-      m.prenom.toLowerCase().includes(term) ||
-      m.specialite.toLowerCase().includes(term)
-    );
-  });
-
-  // Sélection d’un médecin
-  const handleSelect = (m: Medecin) => {
-    const estMedecinTraitant = patient?.medecinTraitantId === m.id;
-    const disponible = m.accepteNouveauxPatients || estMedecinTraitant;
-
-    if (!disponible) return; // bloqué
-
-    setSelectedMedecin(m);
-  };
-
-  // VALIDER
-  const handleSubmit = () => {
-    if (!selectedMedecin) {
-      alert('Veuillez sélectionner un médecin.');
+  // ------------------------------
+  // 🔒 CONTRÔLE ACCÈS MÉDECIN
+  // ------------------------------
+  async function handleSelectMedecin(m: any) {
+    if (!patient) {
+      alert("Vous devez être connecté.");
       return;
     }
 
-    router.push(`/patient/rdv?medecinId=${selectedMedecin.id}`);
-  };
+    if (m.accepteNouveauxPatients) {
+      router.push(`/patient/rdv?medecinId=${m.id}`);
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `http://localhost:3001/patient/${patient.id}/can-access-medecin/${m.id}`
+      );
+
+      if (!res.ok) {
+        alert("Impossible de vérifier l’accès à ce médecin.");
+        return;
+      }
+
+      const data = await res.json();
+
+      if (!data.allowed) {
+        alert(
+          "Ce médecin n’accepte pas de nouveaux patients et vous n’êtes pas dans sa base."
+        );
+        return;
+      }
+
+      router.push(`/patient/rdv?medecinId=${m.id}`);
+    } catch {
+      alert("Erreur réseau lors de la vérification.");
+    }
+  }
 
   return (
-    <main className="p-8 flex flex-col items-center">
-      <h1 className="text-3xl font-bold mb-6">🩺 Choisir mon médecin</h1>
-
-      <div className="w-full max-w-md bg-white p-6 rounded-2xl shadow-md">
-        <input
-          type="text"
-          placeholder="Rechercher un médecin (nom, prénom ou spécialité)..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full border p-2 rounded mb-4"
-        />
-
-        <ul className="max-h-64 overflow-y-auto border rounded-lg">
-          {filtered.map((m) => {
-            const estMedecinTraitant = patient?.medecinTraitantId === m.id;
-            const disponible = m.accepteNouveauxPatients || estMedecinTraitant;
-
-            return (
-              <li
-                key={m.id}
-                onClick={() => disponible && handleSelect(m)}
-                className={`
-                  p-2 
-                  ${disponible ? 'cursor-pointer hover:bg-blue-100' : 'opacity-40 cursor-not-allowed'}
-                  ${selectedMedecin?.id === m.id ? 'bg-blue-200 font-semibold' : ''}
-                `}
-              >
-                <div className="flex justify-between items-center">
-                  <span>
-                    {m.prenom} {m.nom} —{' '}
-                    <span className="text-gray-500">{m.specialite}</span>
-                  </span>
-
-                  {!disponible && (
-                    <span className="text-sm text-red-500">
-                      N’accepte plus
-                    </span>
-                  )}
-                </div>
-              </li>
-            );
-          })}
-
-          {filtered.length === 0 && (
-            <li className="p-2 text-gray-500 text-center">
-              Aucun médecin trouvé
-            </li>
-          )}
-        </ul>
-
+    <div className="p-5">
+      <div className="mb-4">
         <button
-          onClick={handleSubmit}
-          className="mt-6 w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded-lg"
+          onClick={() => router.push("/patient/dashboard")}
+          className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
         >
-          Continuer ➜
+          ← Retour au tableau de bord
         </button>
       </div>
-    </main>
+
+      <div className="flex gap-10">
+        <div className="w-1/3">
+          <h2 className="text-xl font-bold mb-4">Médecins favoris</h2>
+
+          {loaded ? (
+            <FavorisList favoris={favoris} removeFavori={removeFavori} />
+          ) : (
+            <p>Chargement…</p>
+          )}
+
+          <div className="mt-5">
+            <AddFavoriInput onAdd={addFavori} />
+          </div>
+        </div>
+
+        <div className="flex-1">
+          <FiltersForm onChangeFilters={setFilters} />
+
+          <div className="mt-5">
+            {results.length === 0 ? (
+              <p className="text-gray-500">Aucun médecin trouvé.</p>
+            ) : (
+              <div className="grid grid-cols-1 gap-4">
+                {results.map((m) => (
+                  <div
+                    key={m.id}
+                    onClick={() => handleSelectMedecin(m)}
+                    className="cursor-pointer"
+                  >
+                    <MedecinCard medecin={m} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

@@ -1,4 +1,3 @@
-// src/medecin/dto/create-medecin.dto.ts
 import {
   IsBoolean,
   IsEmail,
@@ -17,7 +16,6 @@ export class CreateMedecinDto {
   @IsEmail()
   email: string;
 
-  // 🔐 Mot de passe médecin (obligatoire à la création)
   @IsString()
   motDePasse: string;
 
@@ -50,7 +48,7 @@ export class CreateMedecinDto {
   photoUrl?: string;
 
   @IsOptional()
-  horaires?: any; // JSON libre
+  horaires?: any;
 
   @IsOptional()
   @IsString()

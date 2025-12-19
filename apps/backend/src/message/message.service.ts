@@ -1,6 +1,10 @@
 // apps/backend/src/message/message.service.ts
 
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateMessageDto } from './dto/create-message.dto';
 
@@ -12,7 +16,8 @@ export class MessageService {
    * Envoyer un message dans une conversation
    */
   async create(dto: CreateMessageDto) {
-    const { fromId, conversationId, contenu } = dto;
+    // on tolère la présence d'un champ "fichiers" sans casser si le DTO TS n'est pas encore à jour
+    const { fromId, conversationId, contenu, fichiers } = dto as any;
 
     // Vérifier que la conversation existe
     const conversation = await this.prisma.conversation.findUnique({
@@ -29,7 +34,9 @@ export class MessageService {
     });
 
     if (!isMember) {
-      throw new ForbiddenException("Ce médecin n'appartient pas à cette conversation.");
+      throw new ForbiddenException(
+        "Ce médecin n'appartient pas à cette conversation.",
+      );
     }
 
     // Créer le message
@@ -38,6 +45,7 @@ export class MessageService {
         contenu,
         fromId,
         conversationId,
+        fichiers: fichiers ?? undefined, // Json? dans Prisma (liste d'objets {name,url,size,type}[])
       },
       include: {
         from: true,

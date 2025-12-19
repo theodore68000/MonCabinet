@@ -3,6 +3,6 @@ import { MailService } from './mail.service';
 
 @Module({
   providers: [MailService],
-  exports: [MailService],
+  exports: [MailService], // ✅ OBLIGATOIRE
 })
 export class MailModule {}

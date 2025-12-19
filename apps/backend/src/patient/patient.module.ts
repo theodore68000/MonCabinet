@@ -1,12 +1,19 @@
 import { Module } from '@nestjs/common';
-import { PatientService } from './patient.service';
 import { PatientController } from './patient.controller';
-import { PrismaService } from '../prisma/prisma.service';
-import { MailModule } from '../mail/mail.module'; // ✅ Import nécessaire
+import { PatientService } from './patient.service';
+import { PrismaModule } from 'src/prisma/prisma.module';
+import { RdvModule } from 'src/rdv/rdv.module';
+import { MailModule } from 'src/mail/mail.module';
+import { SecurityModule } from 'src/common/security/security.module'; // ✅
 
 @Module({
-  imports: [MailModule], // ✅ Ajout
+  imports: [
+    PrismaModule,
+    RdvModule,
+    MailModule,
+    SecurityModule, // ✅ C’EST TOUT
+  ],
   controllers: [PatientController],
-  providers: [PatientService, PrismaService],
+  providers: [PatientService],
 })
 export class PatientModule {}

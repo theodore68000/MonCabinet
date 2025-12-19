@@ -1,23 +1,19 @@
-// src/medecin/dto/update-medecin.dto.ts
-
 import {
   IsOptional,
   IsString,
   IsBoolean,
   IsEmail,
+  IsNumber,
 } from 'class-validator';
 
 export class UpdateMedecinDto {
-
-  // ❌ Non modifiable : nom, prénom, id
-
   @IsOptional()
   @IsEmail()
   email?: string;
 
   @IsOptional()
   @IsString()
-  motDePasse?: string; // ✔ modifiable
+  motDePasse?: string;
 
   @IsOptional()
   @IsString()
@@ -60,7 +56,9 @@ export class UpdateMedecinDto {
 
   @IsOptional()
   @IsString()
-  statut?: string; // ✔ modifiable
+  statut?: string;
 
-  // ❌ Non modifiable : rpps, cabinetId, resetToken, resetExpires
+  @IsOptional()
+  @IsNumber()
+  newId?: number;
 }

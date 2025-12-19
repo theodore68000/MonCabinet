@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import FullCalendar, {
   EventClickArg,
   CalendarApi,
@@ -21,16 +22,22 @@ type RdvEvent = {
 };
 
 export default function RdvPage() {
+  const router = useRouter();
+
   const [events, setEvents] = useState<RdvEvent[]>([]);
   const [medecinId, setMedecinId] = useState<number | null>(null);
   const [patient, setPatient] = useState<any>(null);
-
-  // 🆕 RDV FUTUR si existe
   const [futureRdv, setFutureRdv] = useState<any>(null);
+
+  // ✅ EXISTANT
+  const [accessError, setAccessError] = useState<string | null>(null);
+
+  // ✅ NOUVEAU (bloquer AVANT planning)
+  // null = en cours / inconnu ; true = autorisé ; false = interdit
+  const [canBook, setCanBook] = useState<boolean | null>(null);
 
   const calendarRef = useRef<any>(null);
 
-  // ⭐ Format local YYYY-MM-DD
   const formatDateLocal = (d: Date): string => {
     const y = d.getFullYear();
     const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -43,27 +50,89 @@ export default function RdvPage() {
     const d = new Date();
     d.setHours(h);
     d.setMinutes(m + 15);
-    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return `${String(d.getHours()).padStart(2, "0")}:${String(
+      d.getMinutes()
+    ).padStart(2, "0")}`;
   };
 
+  // ---------------------------------------------------------------------
   // Charger patient
+  // ---------------------------------------------------------------------
   useEffect(() => {
-    const p = localStorage.getItem("patient");
+    let p =
+      localStorage.getItem("patient") ??
+      localStorage.getItem("patientSession") ??
+      null;
+
     if (!p) {
-      window.location.href = "/patient/login";
+      console.warn("⚠️ Aucun patient trouvé dans localStorage.");
       return;
     }
-    setPatient(JSON.parse(p));
+
+    try {
+      const parsed = JSON.parse(p);
+      parsed.id = Number(parsed.id);
+      setPatient(parsed);
+
+      // Vérification silencieuse
+      fetch(`http://localhost:3001/patient/${parsed.id}`).catch(() => {
+        console.warn("⚠️ Patient introuvable en BDD mais conservé côté client.");
+      });
+    } catch {
+      localStorage.removeItem("patient");
+      localStorage.removeItem("patientSession");
+      console.error("❌ Patient localStorage corrompu → supprimé.");
+    }
   }, []);
 
-  // Lire medecinId dans URL
+  // ---------------------------------------------------------------------
+  // Lire medecinId
+  // ---------------------------------------------------------------------
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const mId = params.get("medecinId");
     if (mId) setMedecinId(Number(mId));
   }, []);
 
-  // Vérifier si RDV futur existe
+  // ---------------------------------------------------------------------
+  // ✅ NOUVEAU : Vérifier le droit AVANT d'afficher le planning
+  // ---------------------------------------------------------------------
+useEffect(() => {
+  if (!patient || !medecinId) return;
+
+  setCanBook(null);
+  setAccessError(null);
+
+  fetch(
+    `http://localhost:3001/rdv/can-book?medecinId=${medecinId}&patientId=${patient.id}`
+  )
+    .then(async (res) => {
+      if (res.status === 403) {
+        setCanBook(false);
+        setAccessError("Ce médecin ne prend pas de nouveaux patients.");
+        setEvents([]);
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error("can-book failed");
+      }
+
+      // ✅ 200 = autorisé
+      setCanBook(true);
+    })
+    .catch(() => {
+      // fallback safe : on bloque seulement en cas d’erreur réseau
+      setCanBook(false);
+      setAccessError("Ce médecin ne prend pas de nouveaux patients.");
+      setEvents([]);
+    });
+}, [patient, medecinId]);
+
+
+  // ---------------------------------------------------------------------
+  // Vérifier RDV futur
+  // ---------------------------------------------------------------------
   async function checkFutureRdv() {
     if (!patient || !medecinId) return;
 
@@ -97,69 +166,53 @@ export default function RdvPage() {
     checkFutureRdv();
   }, [patient, medecinId]);
 
-  // Charger plage calendrier
+  // ---------------------------------------------------------------------
+  // Charger disponibilités (FIX CSV)
+  // ---------------------------------------------------------------------
   async function loadRange(start: Date, end: Date) {
-    if (!medecinId || futureRdv) return;
+    if (!medecinId || !patient || futureRdv) return;
 
+    // ✅ NOUVEAU : si non autorisé, on ne charge rien
+    if (canBook === false) return;
+
+    setAccessError(null);
     const all: RdvEvent[] = [];
-
-    let rdvs: any[] = [];
-    try {
-      const res = await fetch(
-        `http://localhost:3001/rdv?medecinId=${medecinId}`
-      );
-      if (res.ok) rdvs = await res.json();
-    } catch {}
-
     const cur = new Date(start);
 
     while (cur < end) {
       const dateStr = formatDateLocal(cur);
-      const dow = cur.getDay();
 
-      // RDV PRIS
-      const dayRdvs = rdvs.filter((r) => {
-        return formatDateLocal(new Date(r.date)) === dateStr;
-      });
+      try {
+        const res = await fetch(
+          `http://localhost:3001/rdv/disponibilites` +
+            `?medecinId=${medecinId}` +
+            `&date=${dateStr}` +
+            `&patientId=${patient.id}`
+        );
 
-      dayRdvs.forEach((rdv) => {
-        const startDt = `${dateStr}T${rdv.heure}`;
-        const endDt = `${dateStr}T${add15(rdv.heure)}`;
-
-        all.push({
-          id: `taken-${rdv.id}`,
-          title: "Pris",
-          start: startDt,
-          end: endDt,
-          color: "red",
-          extendedProps: { type: "taken" },
-        });
-      });
-
-      // DISPONIBILITÉS UNIQUEMENT SI PAS DE FUTUR RDV
-      if (!futureRdv && dow >= 1 && dow <= 5) {
-        try {
-          const resFree = await fetch(
-            `http://localhost:3001/rdv/disponibilites?medecinId=${medecinId}&date=${dateStr}`
-          );
-          if (resFree.ok) {
-            const free: string[] = await resFree.json();
-            free.forEach((h) => {
-              const startDt = `${dateStr}T${h}`;
-              const endDt = `${dateStr}T${add15(h)}`;
-
-              all.push({
-                id: `free-${dateStr}-${h}`,
-                title: "Disponible",
-                start: startDt,
-                end: endDt,
-                color: "green",
-                extendedProps: { type: "free" },
-              });
-            });
+        if (!res.ok) {
+          if (res.status === 403) {
+            setAccessError("Ce médecin ne prend pas de nouveaux patients.");
+            setCanBook(false); // ✅ verrouillage
+            setEvents([]);
+            return;
           }
-        } catch {}
-      }
+          throw new Error();
+        }
+
+        const free: string[] = await res.json();
+
+        free.forEach((h) => {
+          all.push({
+            id: `free-${dateStr}-${h}`,
+            title: "Disponible",
+            start: `${dateStr}T${h}`,
+            end: `${dateStr}T${add15(h)}`,
+            color: "#00c853",
+            extendedProps: { type: "free" },
+          });
+        });
+      } catch {}
 
       cur.setDate(cur.getDate() + 1);
     }
@@ -167,120 +220,155 @@ export default function RdvPage() {
     setEvents(all);
   }
 
-  // Update affichage semaine
   async function handleDatesSet(arg: DatesSetArg) {
     if (!medecinId || futureRdv) return;
+
+    // ✅ NOUVEAU : ne pas charger si interdit ou en cours de check
+    if (canBook === false || canBook === null) return;
+
     await loadRange(arg.start, arg.end);
   }
 
-  // Recharger quand medecinId change
   useEffect(() => {
     if (!medecinId || futureRdv) return;
+
+    // ✅ NOUVEAU : ne pas charger si interdit ou en cours de check
+    if (canBook === false || canBook === null) return;
 
     const api: CalendarApi | undefined = calendarRef.current?.getApi();
     if (!api) return;
 
     loadRange(api.view.activeStart, api.view.activeEnd);
-  }, [medecinId, futureRdv]);
+  }, [medecinId, futureRdv, canBook]);
 
-  // Clic créneau
+  // ---------------------------------------------------------------------
+  // CLIC SUR CRÉNEAU
+  // ---------------------------------------------------------------------
   async function handleEventClick(info: EventClickArg) {
-    if (!patient) return;
+    if (accessError || canBook === false) {
+      alert(accessError ?? "Vous ne pouvez pas prendre de rendez-vous avec ce médecin.");
+      return;
+    }
 
-    const type = info.event.extendedProps["type"];
-
-    if (type === "taken") {
-      alert("Ce créneau est déjà réservé.");
+    if (!patient) {
+      alert("Vous devez être connecté en tant que patient pour réserver.");
       return;
     }
 
     if (futureRdv) {
-      alert("Vous avez déjà un rendez-vous. Vous ne pouvez pas en réserver un autre.");
+      alert("Vous avez déjà un rendez-vous avec ce médecin.");
       return;
     }
 
-    const start = info.event.start!;
+    if (!medecinId) {
+      alert("Médecin non sélectionné.");
+      return;
+    }
+
+    const start = info.event.start;
+    if (!start) return;
+
     const dateStr = formatDateLocal(start);
     const heure = start.toTimeString().slice(0, 5);
 
-    const motif = prompt(
-      `Prendre rendez-vous le ${dateStr} à ${heure}\n\nMotif :`
-    );
+    const motif = prompt(`Prendre rendez-vous le ${dateStr} à ${heure}\n\nMotif :`);
     if (!motif) return;
 
     try {
-      const res = await fetch("http://localhost:3001/rdv", {
+      const res = await fetch(`http://localhost:3001/patient/${patient.id}/rdv`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           date: dateStr,
           heure,
           motif,
-          patientId: patient.id,
-          medecinId,
+          medecinId: medecinId, // number
+          typeConsultation: "PRESENTIEL",
         }),
       });
 
       const data = await res.json();
+
       if (!res.ok) {
-        alert(data.message || "Erreur.");
+        // ✅ NOUVEAU : si le back refuse (CSV), on bloque l’UX immédiatement
+        if (res.status === 403) {
+          setCanBook(false);
+          setAccessError("Ce médecin ne prend pas de nouveaux patients.");
+          setEvents([]);
+        }
+        alert(data?.message || "Erreur lors de la réservation.");
         return;
       }
 
       alert("Rendez-vous réservé !");
-      setFutureRdv(data); // nouveau RDV
-    } catch {
+      setFutureRdv(data);
+    } catch (error) {
+      console.error(error);
       alert("Erreur lors de la réservation.");
     }
   }
 
-  // 🆕 Annuler RDV
+  // ---------------------------------------------------------------------
+  // ANNULATION
+  // ---------------------------------------------------------------------
   async function cancelRdv() {
     if (!futureRdv) return;
 
     if (!confirm("Voulez-vous vraiment annuler ce rendez-vous ?")) return;
 
     try {
-      const res = await fetch(`http://localhost:3001/rdv/${futureRdv.id}`, {
-        method: "DELETE",
-      });
+      const res = await fetch(
+        `http://localhost:3001/rdv/patient/${futureRdv.id}`,
+        {
+          method: "DELETE",
+        }
+      );
 
       if (res.ok) {
         alert("Rendez-vous annulé.");
         setFutureRdv(null);
+
+        const api: CalendarApi | undefined = calendarRef.current?.getApi();
+        if (api && medecinId) {
+          loadRange(api.view.activeStart, api.view.activeEnd);
+        }
       } else {
         alert("Erreur lors de l’annulation.");
       }
     } catch {
-      alert("Erreur lors de l’annulation.");
+      alert("Erreur.");
     }
   }
 
-  // 🆕 AFFICHAGE SI RDV FUTUR EXISTE
+  // ---------------------------------------------------------------------
+  // UI si patient a RDV futur
+  // ---------------------------------------------------------------------
   if (futureRdv) {
     const fullDate = new Date(futureRdv.date);
     const [h, m] = futureRdv.heure.split(":").map(Number);
     fullDate.setHours(h, m, 0, 0);
 
-    const dateStr = fullDate.toLocaleDateString("fr-FR");
-    const heureStr = futureRdv.heure;
-
     return (
       <div className="p-6">
+        {/* 🔙 RETOUR */}
+        <button
+          onClick={() => router.push("/patient/choisir-medecin")}
+          className="mb-6 px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+        >
+          ← Retour au choix du médecin
+        </button>
+
         <h1 className="text-3xl font-bold mb-6">📅 Rendez-vous</h1>
 
         <div className="bg-yellow-100 border border-yellow-400 p-5 rounded-md text-lg">
           <p className="font-semibold mb-3">
             Vous avez déjà un rendez-vous prévu :
           </p>
-          <p className="mb-4">
-            <strong>{dateStr}</strong> à <strong>{heureStr}</strong>
-          </p>
 
           <p className="mb-4">
-            Vous pourrez réserver un nouveau créneau une fois ce rendez-vous passé.
-            <br />
-            Ou vous pouvez annuler votre rendez-vous actuel pour en choisir un autre.
+            <strong>
+              {fullDate.toLocaleDateString("fr-FR")} à {futureRdv.heure}
+            </strong>
           </p>
 
           <button
@@ -294,10 +382,49 @@ export default function RdvPage() {
     );
   }
 
-  // Sinon → CALENDRIER NORMAL
+  // ---------------------------------------------------------------------
+  // ✅ NOUVEAU : si interdit, on n’affiche pas le calendrier (mais on garde le layout)
+  // ---------------------------------------------------------------------
+  if (canBook === false) {
+    return (
+      <div className="p-6">
+        {/* 🔙 RETOUR */}
+        <button
+          onClick={() => router.push("/patient/choisir-medecin")}
+          className="mb-4 px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+        >
+          ← Retour au choix du médecin
+        </button>
+
+        <h1 className="text-3xl font-bold mb-4">📅 Rendez-vous</h1>
+
+        <div className="mb-4 rounded border border-red-400 bg-red-100 p-4">
+          {accessError ?? "Vous ne pouvez pas prendre de rendez-vous avec ce médecin."}
+        </div>
+      </div>
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // UI Calendrier
+  // ---------------------------------------------------------------------
   return (
     <div className="p-6">
+      {/* 🔙 RETOUR */}
+      <button
+        onClick={() => router.push("/patient/choisir-medecin")}
+        className="mb-4 px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+      >
+        ← Retour au choix du médecin
+      </button>
+
       <h1 className="text-3xl font-bold mb-4">📅 Rendez-vous</h1>
+
+      {accessError && (
+        <div className="mb-4 rounded border border-red-400 bg-red-100 p-4">
+          {accessError}
+        </div>
+      )}
 
       <FullCalendar
         ref={calendarRef}
