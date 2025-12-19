@@ -17,6 +17,7 @@
     "@headlessui/react": "^2.2.9",
     "@livekit/components-react": "^2.9.16",
     "@livekit/components-styles": "^1.2.0",
+    "@next/eslint-plugin-next": "16.0.10",
     "livekit-client": "^2.16.0",
     "lucide-react": "^0.554.0",
     "next": "16.0.10",
@@ -33,7 +34,7 @@
     "@types/react-dom": "^19",
     "@types/socket.io-client": "^3.0.0",
     "eslint": "^9",
-    "eslint-config-next": "16.0.1",
+    "eslint-config-next": "16.0.10",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
