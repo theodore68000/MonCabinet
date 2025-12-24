@@ -179,7 +179,6 @@ model HorairesExceptionnels {
 //   RENDEZ-VOUS
 // ──────────────────────────────────────────────────────────────
 //
-
 model RendezVous {
   id       Int      @id @default(autoincrement())
   date     DateTime
@@ -206,11 +205,14 @@ model RendezVous {
   paiement   Paiement?
   formulaire FormulairePreconsultation?
 
-  // ✅ AJOUT — identité patient hors cabinet / CSV
   patientIdentity Json?
+
+  // ✅ NOUVEAU — décision métier
+  formulaireDemande Boolean @default(false)
 
   createdAt DateTime @default(now())
 }
+
 
 //
 // ──────────────────────────────────────────────────────────────

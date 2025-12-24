@@ -1,6 +1,6 @@
 "use client";
 
-import { Calendar, User, LogOut, FileText } from "lucide-react";
+import { Calendar, User, LogOut, FileText, Clock } from "lucide-react";
 import { useRouter, usePathname } from "next/navigation";
 
 export default function SidebarSecretaire() {
@@ -8,11 +8,26 @@ export default function SidebarSecretaire() {
   const pathname = usePathname();
 
   const items = [
-    { label: "Planning", icon: <Calendar size={18} />, path: "/secretaire/dashboard" },
-    { label: "Mon profil", icon: <User size={18} />, path: "/secretaire/dashboard/profil" },
-
-    // 🔥 AJOUT : Fiches patients
-    { label: "Fiches patients", icon: <FileText size={18} />, path: "/secretaire/dashboard/patient-notes" },
+    {
+      label: "Planning",
+      icon: <Calendar size={18} />,
+      path: "/secretaire/dashboard",
+    },
+    {
+      label: "Horaires de référence",
+      icon: <Clock size={18} />,
+      path: "/secretaire/dashboard/horaires-reference",
+    },
+    {
+      label: "Mon profil",
+      icon: <User size={18} />,
+      path: "/secretaire/dashboard/profil",
+    },
+    {
+      label: "Fiches patients",
+      icon: <FileText size={18} />,
+      path: "/secretaire/dashboard/patient-notes",
+    },
   ];
 
   const logout = () => {
@@ -22,14 +37,18 @@ export default function SidebarSecretaire() {
 
   return (
     <div className="h-screen w-64 bg-slate-900 border-r border-slate-800 flex flex-col">
-      <div className="p-6 text-xl text-emerald-400 font-bold">Espace secrétaire</div>
+      <div className="p-6 text-xl text-emerald-400 font-bold">
+        Espace secrétaire
+      </div>
 
       <div className="flex-1 space-y-1">
-        {items.map((item, index) => {
-          const active = pathname.startsWith(item.path);
+        {items.map((item) => {
+          const active =
+            pathname === item.path || pathname.startsWith(item.path + "/");
+
           return (
             <button
-              key={index}
+              key={item.path}
               onClick={() => router.push(item.path)}
               className={`w-full flex items-center gap-3 px-6 py-3 transition ${
                 active

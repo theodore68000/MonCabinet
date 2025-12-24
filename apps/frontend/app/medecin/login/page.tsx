@@ -43,6 +43,11 @@ export default function MedecinAuthLogin() {
         photoUrl: data.medecin.photoUrl,
       };
 
+      // 🔥🔥🔥 FIX UNIQUE (OPTION A)
+      // Utilisé par la page horaires (/medecin/dashboard/horaires)
+      localStorage.setItem("medecinId", String(data.medecin.id));
+
+      // EXISTANT — on ne touche pas
       localStorage.setItem("medecinSession", JSON.stringify(session));
 
       router.push("/medecin/dashboard");

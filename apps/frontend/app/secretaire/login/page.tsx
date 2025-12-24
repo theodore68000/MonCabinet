@@ -14,16 +14,17 @@ export default function SecretaireLoginPage() {
     setError("");
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/secretaire/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: email.trim(),
-          motDePasse: motDePasse.trim(),
-        }),
-      });
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/secretaire/login`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email,
+            motDePasse,
+          }),
+        }
+      );
 
       const data = await res.json();
 
@@ -32,46 +33,67 @@ export default function SecretaireLoginPage() {
         return;
       }
 
-      localStorage.setItem("secretaireSession", JSON.stringify(data.secretaire));
+      localStorage.setItem(
+        "secretaireSession",
+        JSON.stringify(data.secretaire)
+      );
+
       router.push("/secretaire/dashboard");
-    } catch (err) {
+    } catch {
       setError("Erreur serveur");
     }
   };
 
   return (
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
-      <div className="bg-slate-900 p-6 rounded-xl border border-slate-800 w-full max-w-md">
-        <h1 className="text-2xl font-bold text-emerald-400 mb-6 text-center">
+      <div className="bg-slate-900 p-6 rounded-xl w-full max-w-md border border-slate-800">
+        <h1 className="text-2xl font-bold text-emerald-400 mb-4 text-center">
           Connexion secrétaire
         </h1>
 
-        {error && <p className="text-red-400 text-center mb-4">{error}</p>}
+        {error && (
+          <p className="text-red-400 text-sm text-center mb-3">{error}</p>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <input
             type="email"
+            className="w-full p-3 bg-slate-800 rounded-lg border border-slate-600 text-white"
             placeholder="Email"
-            className="w-full p-3 rounded-lg bg-slate-800 border border-slate-700"
-            value={email}
+            required
             onChange={(e) => setEmail(e.target.value)}
           />
 
-          <input
-            type="password"
-            placeholder="Mot de passe"
-            className="w-full p-3 rounded-lg bg-slate-800 border border-slate-700"
-            value={motDePasse}
-            onChange={(e) => setMotDePasse(e.target.value)}
-          />
+<input
+  type="password"
+  className="w-full p-3 bg-slate-800 rounded-lg border border-slate-600 text-white"
+  placeholder="Mot de passe"
+  required
+  value={motDePasse}
+  onChange={(e) => setMotDePasse(e.target.value)}
+/>
 
           <button
             type="submit"
-            className="w-full p-3 bg-emerald-500 rounded-lg font-bold text-black hover:bg-emerald-400"
+            className="w-full p-3 bg-emerald-500 rounded-lg font-bold text-black hover:bg-emerald-400 transition"
           >
             Se connecter
           </button>
         </form>
+
+        {/* --------------------------- */}
+        {/*  Liens supplémentaires     */}
+        {/* --------------------------- */}
+        <div className="mt-4 text-center space-y-2">
+          <div>
+            <button
+              className="text-slate-400 hover:text-slate-300 text-sm"
+              onClick={() => router.push("/medecin/login")}
+            >
+              Je suis médecin
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

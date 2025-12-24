@@ -16,6 +16,7 @@ import { DocumentModule } from './document/document.module';
 import { NotificationModule } from './notification/notification.module';
 import { ProcheModule } from './proche/proche.module';
 import { SecretaireModule } from './secretaire/secretaire.module';
+import { ScheduleReferenceModule } from './schedule-reference/schedule-reference.module';
 
 // Paiement + Stripe
 import { StripeModule } from './stripe/stripe.module';
@@ -48,6 +49,7 @@ import { CronModule } from './cron/cron.module';
     // Module CRON
     CronModule,
 
+    ScheduleReferenceModule,
     // Domaines
     PatientModule,
     RdvModule,

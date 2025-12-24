@@ -6,6 +6,7 @@ import {
   IsIn,
   IsInt,
   ValidateNested,
+  IsBoolean,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -41,10 +42,12 @@ export class CreateRdvDto {
   @IsString()
   motif?: string | null;
 
+  // 🔹 Patient direct
   @IsOptional()
   @IsInt()
   patientId?: number | null;
 
+  // 🔹 Proche
   @IsOptional()
   @IsInt()
   procheId?: number | null;
@@ -61,9 +64,16 @@ export class CreateRdvDto {
   @IsIn(['LIBRE', 'PRIS', 'BLOQUE', 'HORS'])
   typeSlot?: 'LIBRE' | 'PRIS' | 'BLOQUE' | 'HORS';
 
-  // ✅ AJOUT — identité patient (CSV ou HORS)
+  // ✅ Identité patient hors DB (CSV / HORS)
   @IsOptional()
   @ValidateNested()
   @Type(() => PatientIdentityDto)
   patientIdentity?: PatientIdentityDto;
+
+  // ✅ NOUVEAU — décision formulaire
+  // - forcé à true côté patient / proche (logique service)
+  // - optionnel côté médecin (checkbox)
+  @IsOptional()
+  @IsBoolean()
+  formulaireDemande?: boolean;
 }

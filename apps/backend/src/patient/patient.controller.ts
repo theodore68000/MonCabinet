@@ -243,17 +243,18 @@ async canAccessMedecin(
   // 🗓️ RDV — PATIENT (AJOUT SANS SUPPRESSION)
   // ───────────────────────────────────────────────
 
-  @Post(':id/rdv')
-  prendreRdv(
-    @Param('id') id: string,
-    @Body() dto: CreateRdvDto,
-  ) {
-    return this.rdvService.createForPatient({
-      ...dto,
-      patientId: Number(id),
-      typeSlot: 'PRIS',
-    });
-  }
+@Post(':id/rdv')
+prendreRdv(
+  @Param('id') id: string,
+  @Body() dto: CreateRdvDto,
+) {
+  return this.rdvService.createForPatient({
+    ...dto,
+    patientId: Number(id),
+    procheId: null,
+  });
+}
+
 
   @Get(':id/rdv')
   mesRdvs(@Param('id') id: string) {

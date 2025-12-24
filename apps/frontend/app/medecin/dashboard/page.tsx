@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Fragment } from "react";
+import { useEffect, useState, Fragment, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Sidebar from "./components/Sidebar";
 import AddSlotModal, { ModalMode } from "./components/AddSlotModal";
@@ -35,6 +35,14 @@ type Rdv = {
     prenom: string;
   } | null;
   displayLabel?: string | null;
+
+  // ✅ peut exister côté back (patientIdentity Json)
+  patientIdentity?: {
+    nom?: string;
+    prenom?: string;
+    dateNaissance?: string;
+    source?: "CSV" | "HORS";
+  } | null;
 };
 
 type ViewMode = "day" | "week";
@@ -79,6 +87,43 @@ const makeDragImageInvisible = (e: any) => {
 ---------------------------------------------------------*/
 export default function MedecinDashboard() {
   const router = useRouter();
+
+  /* ✅ SCROLL PRESERVE (planning container) */
+  const planningScrollRef = useRef<HTMLDivElement | null>(null);
+  const lastScrollTopRef = useRef<number>(0);
+
+  // Filet de sécurité pour restore post-render
+  const pendingRestoreRef = useRef<boolean>(false);
+
+  const saveScrollPosition = () => {
+    if (planningScrollRef.current) {
+      lastScrollTopRef.current = planningScrollRef.current.scrollTop;
+    }
+  };
+
+  /**
+   * ✅ Restore robuste :
+   * - double requestAnimationFrame (DOM + layout + paint)
+   * - + micro-timeout pour couvrir setLoading/StrictMode/rerender tardif
+   */
+  const restoreScrollPositionRobust = () => {
+    pendingRestoreRef.current = true;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (planningScrollRef.current) {
+          planningScrollRef.current.scrollTop = lastScrollTopRef.current;
+        }
+
+        setTimeout(() => {
+          if (planningScrollRef.current) {
+            planningScrollRef.current.scrollTop = lastScrollTopRef.current;
+          }
+          pendingRestoreRef.current = false;
+        }, 0);
+      });
+    });
+  };
 
   /* SESSION */
   const [medecin, setMedecin] = useState<MedecinSession | null>(null);
@@ -155,7 +200,6 @@ export default function MedecinDashboard() {
     ).padStart(2, "0")}`;
 
   const toLocalISOString = (d: Date) => {
-    // Convertit la date locale en ISO en compensant le décalage
     const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
     return local.toISOString();
   };
@@ -182,91 +226,66 @@ export default function MedecinDashboard() {
     return `${hh}:${mm}`;
   });
 
-  const getDayKey = (d: Date) => DAY_NAMES[d.getDay()];
-
-  const isWithinHoraires = (date: Date, heure: string) => {
-    if (!horaires) return false;
-    const key = getDayKey(date);
-    const slots = horaires[key] || [];
-    if (!slots.length) return false;
-
-    const [h, m] = heure.split(":").map(Number);
-    const current = h * 60 + m;
-
-    for (const interval of slots) {
-      const [s, e] = interval.split("-");
-      const [sh, sm] = s.split(":").map(Number);
-      const [eh, em] = e.split(":").map(Number);
-      if (current >= sh * 60 + sm && current < eh * 60 + em) return true;
-    }
-    return false;
-  };
-
   /* -------------------------------------------------------
-     UNIFICATION AFFICHAGE DES CRENEAUX
+     🔥 UNIFICATION AFFICHAGE DES CRENEAUX (RÉEL UNIQUEMENT)
   ---------------------------------------------------------*/
-const computeSlotVisual = (rdv: Rdv | undefined, inHoraires: boolean) => {
-  const slotType = (rdv?.typeSlot || "").toLowerCase() as
-    | "hors"
-    | "libre"
-    | "pris"
-    | "bloque"
-    | "";
+  const computeSlotVisual = (rdv: Rdv | undefined) => {
+    const slotType = (rdv?.typeSlot || "").toLowerCase() as
+      | "hors"
+      | "libre"
+      | "pris"
+      | "bloque"
+      | "";
 
-  if (slotType === "bloque") {
+    if (slotType === "bloque") {
+      return {
+        label: "Bloqué",
+        className:
+          "bg-red-600/20 border border-red-500/60 text-white font-semibold",
+        showMotif: false,
+      };
+    }
+
+    if (slotType === "pris") {
+      const prenom =
+        rdv?.patient?.prenom ||
+        rdv?.proche?.prenom ||
+        rdv?.patientIdentity?.prenom ||
+        "";
+
+      const nom =
+        rdv?.patient?.nom || rdv?.proche?.nom || rdv?.patientIdentity?.nom || "";
+
+      const identite = prenom || nom ? `${prenom} ${nom}`.trim() : "RDV";
+
+      const consultation =
+        rdv?.typeConsultation === "VISIO" ? "Visio" : "Cabinet";
+
+      return {
+        label: `${identite} — ${consultation}`,
+        className:
+          "bg-emerald-600/20 border border-emerald-500/60 text-emerald-100",
+        showMotif: true,
+      };
+    }
+
+    if (slotType === "libre") {
+      return {
+        label: "Libre",
+        className: "bg-fuchsia-600 border border-fuchsia-400 text-white",
+        showMotif: false,
+      };
+    }
+
     return {
-      label: "Bloqué",
-      className:
-        "bg-red-600/20 border border-red-500/60 text-white font-semibold",
+      label: "",
+      className: "bg-slate-900/40 border border-slate-700 text-slate-500",
       showMotif: false,
     };
-  }
-
-  if (slotType === "pris") {
-    const prenom =
-      rdv?.patient?.prenom ||
-      rdv?.proche?.prenom ||
-      rdv?.patientIdentity?.prenom ||
-      "";
-
-    const nom =
-      rdv?.patient?.nom ||
-      rdv?.proche?.nom ||
-      rdv?.patientIdentity?.nom ||
-      "";
-
-    const identite =
-      prenom || nom ? `${prenom} ${nom}`.trim() : "RDV";
-
-    const consultation =
-      rdv?.typeConsultation === "VISIO" ? "Visio" : "Cabinet";
-
-    return {
-      label: `${identite} — ${consultation}`,
-      className:
-        "bg-emerald-600/20 border border-emerald-500/60 text-emerald-100",
-      showMotif: true,
-    };
-  }
-
-  if (slotType === "libre" || inHoraires) {
-    return {
-      label: "Libre",
-      className: "bg-fuchsia-600 border border-fuchsia-400 text-white",
-      showMotif: false,
-    };
-  }
-
-  // ✅ FALLBACK ABSOLU — JAMAIS undefined
-  return {
-    label: "",
-    className: "bg-slate-900/40 border border-slate-700 text-slate-500",
-    showMotif: false,
   };
-};
 
   /* -------------------------------------------------------
-     FETCH HORAIRES
+     FETCH HORAIRES (uniquement pour ScheduleDrawer)
   ---------------------------------------------------------*/
   const fetchHoraires = async () => {
     if (!medecin) return;
@@ -276,7 +295,9 @@ const computeSlotVisual = (rdv: Rdv | undefined, inHoraires: boolean) => {
       const data = await res.json();
 
       const parsed =
-        typeof data.horaires === "string" ? JSON.parse(data.horaires) : data.horaires;
+        typeof data.horaires === "string"
+          ? JSON.parse(data.horaires)
+          : data.horaires;
 
       setHoraires(parsed);
     } catch {
@@ -312,9 +333,11 @@ const computeSlotVisual = (rdv: Rdv | undefined, inHoraires: boolean) => {
 
     try {
       const res = await fetch(
-        `http://localhost:3001/rdv/medecin/${medecin.id}?start=${encodeURIComponent(
-          toLocalISOString(start)
-        )}&end=${encodeURIComponent(toLocalISOString(end))}`
+        `http://localhost:3001/rdv/medecin/${
+          medecin.id
+        }?start=${encodeURIComponent(toLocalISOString(start))}&end=${encodeURIComponent(
+          toLocalISOString(end)
+        )}`
       );
       const data = await res.json();
 
@@ -329,9 +352,26 @@ const computeSlotVisual = (rdv: Rdv | undefined, inHoraires: boolean) => {
     }
   };
 
+  /**
+   * ✅ LA fonction unique à utiliser quand tu veux refresh sans remonter en haut
+   * (modale actions, swap/move, drawer close, etc.)
+   */
+  const refreshPlanningPreserveScroll = async () => {
+    saveScrollPosition();
+    await fetchPlanning();
+    restoreScrollPositionRobust();
+  };
+
   useEffect(() => {
     if (medecin) fetchPlanning();
   }, [medecin, selectedDate, viewMode]);
+
+  // ✅ Filet de sécurité : si un restore est pending, on le refait quand loading retombe
+  useEffect(() => {
+    if (!loading && pendingRestoreRef.current) {
+      restoreScrollPositionRobust();
+    }
+  }, [loading]);
 
   /* -------------------------------------------------------
      NAVIGATION
@@ -387,6 +427,9 @@ const computeSlotVisual = (rdv: Rdv | undefined, inHoraires: boolean) => {
     initialPatientId?: number | null,
     typeConsulta?: string | null
   ) => {
+    // ✅ capture au moment du clic sur la case
+    saveScrollPosition();
+
     setModal({
       open: true,
       date,
@@ -401,419 +444,229 @@ const computeSlotVisual = (rdv: Rdv | undefined, inHoraires: boolean) => {
   /* -------------------------------------------------------
      DRAG & DROP LOGIQUE MÉDECIN
   ---------------------------------------------------------*/
-const handleDropMedecin = async (toDateStr: string, toHour: string) => {
-  if (!dragData || !medecin) return;
+  const handleDropMedecin = async (toDateStr: string, toHour: string) => {
+    if (!dragData || !medecin) return;
 
-  const { fromDate, fromHour } = dragData;
-  setDragData(null);
+    // ✅ capture juste avant de lancer swap/move (c’est ce que tu veux)
+    saveScrollPosition();
 
-  // même case → rien
-  if (fromDate === toDateStr && fromHour === toHour) {
-    return;
-  }
+    const { fromDate, fromHour } = dragData;
+    setDragData(null);
 
-  const fromRdv = getCellRdv(fromDate, fromHour);
-  const toRdv = getCellRdv(toDateStr, toHour);
-
-  const fromRealId = fromRdv?.id ?? null;
-  const toRealId = toRdv?.id ?? null;
-
-  // ------------------------------------------------------------
-  // 1) RDV réel → RDV réel : SWAP
-  // ------------------------------------------------------------
-  if (fromRealId && toRealId) {
-    try {
-      const res = await fetch("http://localhost:3001/rdv/swap/medecin", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          firstId: fromRealId,
-          secondId: toRealId,
-        }),
-      });
-
-      if (!res.ok) {
-        alert("Impossible d'échanger ces rendez-vous.");
-        return;
-      }
-
-      await fetchPlanning();
-    } catch {
-      alert("Erreur serveur lors de l'échange des rendez-vous.");
+    if (fromDate === toDateStr && fromHour === toHour) {
+      restoreScrollPositionRobust();
+      return;
     }
-    return;
-  }
 
-  // ------------------------------------------------------------
-  // 2) RDV réel → case vide
-  // 👉 MOVE atomique (création + suppression côté backend)
-  // ------------------------------------------------------------
-  if (fromRealId && !toRealId) {
-    try {
-      const res = await fetch("http://localhost:3001/rdv/move/medecin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rdvId: fromRealId,
-          toDate: toDateStr,
-          toHour: toHour,
-          medecinId: medecin.id,
-        }),
-      });
+    const fromRdv = getCellRdv(fromDate, fromHour);
+    const toRdv = getCellRdv(toDateStr, toHour);
 
-      if (!res.ok) {
-        alert("Impossible de déplacer le rendez-vous.");
-        return;
-      }
+    const fromRealId = fromRdv?.id ?? null;
+    const toRealId = toRdv?.id ?? null;
 
-      await fetchPlanning();
-    } catch {
-      alert("Erreur serveur lors du déplacement du rendez-vous.");
+    if (!fromRealId) {
+      restoreScrollPositionRobust();
+      return;
     }
-    return;
-  }
 
-  // ------------------------------------------------------------
-  // 3) Case vide → RDV réel
-  // 👉 on matérialise la case source, puis SWAP
-  // ------------------------------------------------------------
-  if (!fromRealId && toRealId) {
-    try {
-      const createRes = await fetch("http://localhost:3001/rdv/slot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          medecinId: medecin.id,
-          date: fromDate,
-          heure: fromHour,
-          typeSlot: "LIBRE",
-        }),
-      });
+    // 1) SWAP
+    if (fromRealId && toRealId) {
+      try {
+        const res = await fetch("http://localhost:3001/rdv/swap/medecin", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            firstId: fromRealId,
+            secondId: toRealId,
+          }),
+        });
 
-      if (!createRes.ok) {
-        alert("Impossible de créer un créneau pour effectuer l'échange.");
-        return;
+        if (!res.ok) {
+          alert("Impossible d'échanger ces rendez-vous.");
+          restoreScrollPositionRobust();
+          return;
+        }
+
+        await refreshPlanningPreserveScroll();
+      } catch {
+        alert("Erreur serveur lors de l'échange des rendez-vous.");
+        restoreScrollPositionRobust();
       }
-
-      const createData = await createRes.json();
-      const newId: number | undefined = createData?.rdv?.id;
-
-      if (!newId) {
-        alert("Erreur interne lors de la création du créneau.");
-        return;
-      }
-
-      const swapRes = await fetch("http://localhost:3001/rdv/swap/medecin", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          firstId: newId,
-          secondId: toRealId,
-        }),
-      });
-
-      if (!swapRes.ok) {
-        alert("Impossible d'échanger ces rendez-vous.");
-        return;
-      }
-
-      await fetchPlanning();
-    } catch {
-      alert("Erreur serveur lors de l'échange du rendez-vous.");
+      return;
     }
-    return;
-  }
 
-  // ------------------------------------------------------------
-  // 4) Case vide → case vide
-  // 👉 on matérialise puis on déplace
-  // ------------------------------------------------------------
-  if (!fromRealId && !toRealId) {
-    try {
-      const createRes = await fetch("http://localhost:3001/rdv/slot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          medecinId: medecin.id,
-          date: fromDate,
-          heure: fromHour,
-          typeSlot: "LIBRE",
-        }),
-      });
+    // 2) MOVE
+    if (fromRealId && !toRealId) {
+      try {
+        const res = await fetch("http://localhost:3001/rdv/move/medecin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rdvId: fromRealId,
+            toDate: toDateStr,
+            toHour: toHour,
+            medecinId: medecin.id,
+          }),
+        });
 
-      if (!createRes.ok) {
-        alert("Impossible de créer un créneau pour le déplacement.");
-        return;
+        if (!res.ok) {
+          alert("Impossible de déplacer le rendez-vous.");
+          restoreScrollPositionRobust();
+          return;
+        }
+
+        await refreshPlanningPreserveScroll();
+      } catch {
+        alert("Erreur serveur lors du déplacement du rendez-vous.");
+        restoreScrollPositionRobust();
       }
-
-      const createData = await createRes.json();
-      const newId: number | undefined = createData?.rdv?.id;
-
-      if (!newId) {
-        alert("Erreur interne lors de la création du créneau.");
-        return;
-      }
-
-      const updateRes = await fetch(`http://localhost:3001/rdv/${newId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          date: toDateStr,
-          heure: toHour,
-          medecinId: medecin.id,
-        }),
-      });
-
-      if (!updateRes.ok) {
-        alert("Impossible de déplacer le créneau libre.");
-        return;
-      }
-
-      await fetchPlanning();
-    } catch {
-      alert("Erreur serveur lors du déplacement du créneau.");
+      return;
     }
-  }
-};
-
-
+  };
 
   /* -------------------------------------------------------
      RENDER
   ---------------------------------------------------------*/
-return (
-  <div className="flex bg-slate-950 text-white h-screen overflow-hidden">
-    {/* SIDEBAR STICKY */}
-    <div className="sticky top-0 h-screen">
-      <Sidebar />
-    </div>
-
-    <div className="flex-1 max-w-7xl mx-auto flex flex-col overflow-hidden">
-      {/* HEADER STICKY */}
-      <div className="shrink-0 p-8 pb-4 bg-slate-950">
-        <div className="flex justify-between items-center mb-6">
-          <div>
-            <h1 className="text-2xl font-bold text-emerald-400">
-              Dashboard médecin
-            </h1>
-            <p className="text-slate-400">
-              Dr {medecin?.prenom} {medecin?.nom}
-            </p>
-          </div>
-
-          <div className="flex gap-2">
-            <button
-              onClick={() => setViewMode("day")}
-              className={`px-3 py-1 rounded ${
-                viewMode === "day"
-                  ? "bg-emerald-500 text-black"
-                  : "bg-slate-800 text-slate-300"
-              }`}
-            >
-              Jour
-            </button>
-
-            <button
-              onClick={() => setViewMode("week")}
-              className={`px-3 py-1 rounded ${
-                viewMode === "week"
-                  ? "bg-emerald-500 text-black"
-                  : "bg-slate-800 text-slate-300"
-              }`}
-            >
-              Semaine
-            </button>
-          </div>
-        </div>
+  return (
+    <div className="flex bg-slate-950 text-white h-screen overflow-hidden">
+      {/* SIDEBAR STICKY */}
+      <div className="sticky top-0 h-screen">
+        <Sidebar />
       </div>
 
-      {/* PLANNING */}
-      <div className="flex-1 px-8 pb-8 overflow-hidden">
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-lg h-full flex flex-col">
-          {/* NAVIGATION STICKY */}
-          <div className="sticky top-0 z-30 bg-slate-900 p-5 pb-2">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-lg font-semibold">Planning</h2>
+      <div className="flex-1 max-w-7xl mx-auto flex flex-col overflow-hidden">
+        {/* HEADER STICKY */}
+        <div className="shrink-0 p-8 pb-4 bg-slate-950">
+          <div className="flex justify-between items-center mb-6">
+            <div>
+              <h1 className="text-2xl font-bold text-emerald-400">
+                Dashboard médecin
+              </h1>
+              <p className="text-slate-400">
+                Dr {medecin?.prenom} {medecin?.nom}
+              </p>
+            </div>
 
-              {viewMode === "day" ? (
-                <div className="flex items-center gap-3 text-sm">
-                  <button
-                    onClick={goPrevDay}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
-                  >
-                    ◀
-                  </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setViewMode("day")}
+                className={`px-3 py-1 rounded ${
+                  viewMode === "day"
+                    ? "bg-emerald-500 text-black"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                Jour
+              </button>
 
-                  <button
-                    className="underline text-emerald-400 cursor-pointer"
-                    onClick={() => openHorairesDrawer("day", selectedDate)}
-                  >
-                    {formatDate(selectedDate)}
-                  </button>
-
-                  <button
-                    onClick={goNextDay}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
-                  >
-                    ▶
-                  </button>
-                </div>
-              ) : (
-                <div className="flex items-center gap-3 text-sm">
-                  <button
-                    onClick={goPrevWeek}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
-                  >
-                    ◀
-                  </button>
-
-                  <button
-                    className="underline text-emerald-400 cursor-pointer"
-                    onClick={() => openHorairesDrawer("week", weekStart)}
-                  >
-                    Semaine du {toISODate(weekStart)}
-                  </button>
-
-                  <button
-                    onClick={goNextWeek}
-                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
-                  >
-                    ▶
-                  </button>
-                </div>
-              )}
+              <button
+                onClick={() => setViewMode("week")}
+                className={`px-3 py-1 rounded ${
+                  viewMode === "week"
+                    ? "bg-emerald-500 text-black"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                Semaine
+              </button>
             </div>
           </div>
+        </div>
 
-          {/* CONTENU SCROLLABLE */}
-          <div className="flex-1 overflow-auto px-5 pb-5">
-            {/* Loaders */}
-            {loading && <p>Chargement...</p>}
-            {error && !loading && <p className="text-red-400">{error}</p>}
-            {!horaires && !loading && <p>Aucun horaire chargé.</p>}
+        {/* PLANNING */}
+        <div className="flex-1 px-8 pb-8 overflow-hidden">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-lg h-full flex flex-col">
+            {/* NAVIGATION STICKY */}
+            <div className="sticky top-0 z-30 bg-slate-900 p-5 pb-2">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg font-semibold">Planning</h2>
 
-            {/* VUE JOUR */}
-            {viewMode === "day" &&
-              !loading &&
-              !error &&
-              horaires &&
-              (() => {
-                const dateStr = toISODate(selectedDate);
+                {viewMode === "day" ? (
+                  <div className="flex items-center gap-3 text-sm">
+                    <button
+                      onClick={goPrevDay}
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
+                    >
+                      ◀
+                    </button>
 
-                const hasAnyContent = hours.some((hour) => {
-                  const rdv = getCellRdv(dateStr, hour);
-                  const inHoraires = isWithinHoraires(selectedDate, hour);
-                  return !!rdv || inHoraires;
-                });
+                    <button
+                      className="underline text-emerald-400 cursor-pointer"
+                      onClick={() => openHorairesDrawer("day", selectedDate)}
+                    >
+                      {formatDate(selectedDate)}
+                    </button>
 
-                if (!hasAnyContent) return <p>Aucun créneau aujourd’hui.</p>;
-
-                return (
-                  <div className="space-y-2">
-                    {hours
-                      .filter((h) => h !== "07:00")
-                      .map((hour) => {
-                        const rdv = getCellRdv(dateStr, hour);
-                        const inHoraires = isWithinHoraires(selectedDate, hour);
-                        const visual = computeSlotVisual(rdv, inHoraires);
-                        const draggable = !!rdv || inHoraires;
-
-                        return (
-                          <div
-                            key={hour}
-                            className={`border px-4 py-3 rounded-xl cursor-pointer hover:brightness-110 transition ${visual.className}`}
-                            onClick={() =>
-                              openSlotModal(
-                                dateStr,
-                                hour,
-                                "click",
-                                rdv?.id ?? null,
-                                rdv?.patient?.id ?? null,
-                                rdv?.typeConsultation ?? null
-                              )
-                            }
-                            onDragOver={(e) => e.preventDefault()}
-                            onDrop={() => handleDropMedecin(dateStr, hour)}
-                          >
-                            <div
-                              draggable={draggable}
-                              onDragStart={(e) => {
-                                if (!draggable) return;
-                                makeDragImageInvisible(e);
-                                setDragData({
-                                  rdvId: rdv?.id ?? null,
-                                  fromDate: dateStr,
-                                  fromHour: hour,
-                                  fromIsVirtual: !rdv,
-                                });
-                              }}
-                            >
-                              <p className="font-semibold">
-                                {hour}
-                                {visual.label && ` — ${visual.label}`}
-                              </p>
-
-                              {visual.showMotif && rdv?.motif && (
-                                <p className="text-xs mt-1 italic">
-                                  {rdv.motif}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
+                    <button
+                      onClick={goNextDay}
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
+                    >
+                      ▶
+                    </button>
                   </div>
-                );
-              })()}
+                ) : (
+                  <div className="flex items-center gap-3 text-sm">
+                    <button
+                      onClick={goPrevWeek}
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
+                    >
+                      ◀
+                    </button>
 
-            {/* VUE SEMAINE */}
-            {viewMode === "week" && !loading && !error && horaires && (
-              <div className="min-w-[900px]">
-                {/* JOURS + DATES STICKY */}
-                <div className="sticky top-0 z-20 bg-slate-900 pb-2">
-                  <div className="grid grid-cols-[80px_repeat(7,1fr)] text-center text-xs">
-                    <div></div>
-                    {daysOfWeek.map((d) => (
-                      <div
-                        key={d.toISOString()}
-                        className="text-slate-300 cursor-pointer hover:text-emerald-400"
-                        onClick={() => openHorairesDrawer("day", d)}
-                      >
-                        <div className="font-semibold text-sm underline">
-                          {d.toLocaleDateString("fr-FR", { weekday: "short" })}
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          {d.toLocaleDateString("fr-FR", {
-                            day: "2-digit",
-                            month: "2-digit",
-                          })}
-                        </div>
-                      </div>
-                    ))}
+                    <button
+                      className="underline text-emerald-400 cursor-pointer"
+                      onClick={() => openHorairesDrawer("week", weekStart)}
+                    >
+                      Semaine du {toISODate(weekStart)}
+                    </button>
+
+                    <button
+                      onClick={goNextWeek}
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700"
+                    >
+                      ▶
+                    </button>
                   </div>
-                </div>
+                )}
+              </div>
+            </div>
 
-                {/* GRID */}
-                <div className="grid grid-cols-[80px_repeat(7,1fr)] text-[11px]">
-                  {hours
-                    .filter((h) => h !== "07:00")
-                    .map((hour) => (
-                      <Fragment key={hour}>
-                        <div className="h-10 flex items-center justify-center text-slate-400 border-t border-slate-800">
-                          {hour}
-                        </div>
+            {/* CONTENU SCROLLABLE */}
+            <div
+              ref={planningScrollRef}
+              className="flex-1 overflow-auto px-5 pb-5"
+            >
+              {/* Loaders */}
+              {loading && <p>Chargement...</p>}
+              {error && !loading && <p className="text-red-400">{error}</p>}
 
-                        {daysOfWeek.map((d) => {
-                          const dateStr = toISODate(d);
+              {/* VUE JOUR */}
+              {viewMode === "day" &&
+                !loading &&
+                !error &&
+                (() => {
+                  const dateStr = toISODate(selectedDate);
+
+                  const hasAnyContent = hours.some((hour) => {
+                    const rdv = getCellRdv(dateStr, hour);
+                    return !!rdv;
+                  });
+
+                  if (!hasAnyContent) return <p>Aucun créneau aujourd’hui.</p>;
+
+                  return (
+                    <div className="space-y-2">
+                      {hours
+                        .filter((h) => h !== "07:00")
+                        .map((hour) => {
                           const rdv = getCellRdv(dateStr, hour);
-                          const inHoraires = isWithinHoraires(d, hour);
-                          const visual = computeSlotVisual(rdv, inHoraires);
-                          const draggable = !!rdv || inHoraires;
+                          const visual = computeSlotVisual(rdv);
+                          const draggable = !!rdv;
 
                           return (
                             <div
-                              key={dateStr + hour}
-                              className="h-10 border-t border-slate-800 px-1 py-1 cursor-pointer"
+                              key={hour}
+                              className={`border px-4 py-3 rounded-xl cursor-pointer hover:brightness-110 transition ${visual.className}`}
                               onClick={() =>
                                 openSlotModal(
                                   dateStr,
@@ -827,104 +680,202 @@ return (
                               onDragOver={(e) => e.preventDefault()}
                               onDrop={() => handleDropMedecin(dateStr, hour)}
                             >
-                              {rdv ? (
-                                <div
-                                  className={`h-full rounded-lg px-2 flex flex-col justify-center ${visual.className}`}
-                                  draggable={draggable}
-                                  onDragStart={(e) => {
-                                    if (!draggable) return;
-                                    makeDragImageInvisible(e);
-                                    setDragData({
-                                      rdvId: rdv.id,
-                                      fromDate: dateStr,
-                                      fromHour: hour,
-                                      fromIsVirtual: false,
-                                    });
-                                  }}
-                                >
-                                  <span className="font-semibold truncate">
-                                    {visual.label}
-                                  </span>
-                                  {visual.showMotif && rdv.motif && (
-                                    <span className="text-[10px] italic truncate">
-                                      {rdv.motif}
-                                    </span>
-                                  )}
-                                </div>
-                              ) : (
-                                <div
-                                  className={`h-full rounded-lg flex items-center justify-center ${
-                                    inHoraires
-                                      ? "bg-fuchsia-600 border border-fuchsia-400 text-white font-semibold"
-                                      : "bg-slate-950 border border-slate-900"
-                                  }`}
-                                  draggable={draggable}
-                                  onDragStart={(e) => {
-                                    if (!draggable || !inHoraires) return;
-                                    makeDragImageInvisible(e);
-                                    setDragData({
-                                      rdvId: null,
-                                      fromDate: dateStr,
-                                      fromHour: hour,
-                                      fromIsVirtual: true,
-                                    });
-                                  }}
-                                >
-                                  {inHoraires ? "Libre" : ""}
-                                </div>
-                              )}
+                              <div
+                                draggable={draggable}
+                                onDragStart={(e) => {
+                                  if (!draggable) return;
+                                  makeDragImageInvisible(e);
+                                  setDragData({
+                                    rdvId: rdv?.id ?? null,
+                                    fromDate: dateStr,
+                                    fromHour: hour,
+                                    fromIsVirtual: false,
+                                  });
+                                }}
+                              >
+                                <p className="font-semibold">
+                                  {hour}
+                                  {visual.label && ` — ${visual.label}`}
+                                </p>
+
+                                {visual.showMotif && rdv?.motif && (
+                                  <p className="text-xs mt-1 italic">
+                                    {rdv.motif}
+                                  </p>
+                                )}
+                              </div>
                             </div>
                           );
                         })}
-                      </Fragment>
-                    ))}
+                    </div>
+                  );
+                })()}
+
+              {/* VUE SEMAINE */}
+              {viewMode === "week" && !loading && !error && (
+                <div className="min-w-[900px]">
+                  {/* JOURS + DATES STICKY */}
+                  <div className="sticky top-0 z-20 bg-slate-900 pb-2">
+                    <div className="grid grid-cols-[80px_repeat(7,1fr)] text-center text-xs">
+                      <div></div>
+                      {daysOfWeek.map((d) => (
+                        <div
+                          key={d.toISOString()}
+                          className="text-slate-300 cursor-pointer hover:text-emerald-400"
+                          onClick={() => openHorairesDrawer("day", d)}
+                        >
+                          <div className="font-semibold text-sm underline">
+                            {d.toLocaleDateString("fr-FR", {
+                              weekday: "short",
+                            })}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {d.toLocaleDateString("fr-FR", {
+                              day: "2-digit",
+                              month: "2-digit",
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* GRID */}
+                  <div className="grid grid-cols-[80px_repeat(7,1fr)] text-[11px]">
+                    {hours
+                      .filter((h) => h !== "07:00")
+                      .map((hour) => (
+                        <Fragment key={hour}>
+                          <div className="h-10 flex items-center justify-center text-slate-400 border-t border-slate-800">
+                            {hour}
+                          </div>
+
+                          {daysOfWeek.map((d) => {
+                            const dateStr = toISODate(d);
+                            const rdv = getCellRdv(dateStr, hour);
+                            const visual = computeSlotVisual(rdv);
+                            const draggable = !!rdv;
+
+                            return (
+                              <div
+                                key={dateStr + hour}
+                                className="h-10 border-t border-slate-800 px-1 py-1 cursor-pointer"
+                                onClick={() =>
+                                  openSlotModal(
+                                    dateStr,
+                                    hour,
+                                    "click",
+                                    rdv?.id ?? null,
+                                    rdv?.patient?.id ?? null,
+                                    rdv?.typeConsultation ?? null
+                                  )
+                                }
+                                onDragOver={(e) => e.preventDefault()}
+                                onDrop={() => handleDropMedecin(dateStr, hour)}
+                              >
+                                {rdv ? (
+                                  <div
+                                    className={`h-full rounded-lg px-2 flex flex-col justify-center ${visual.className}`}
+                                    draggable={draggable}
+                                    onDragStart={(e) => {
+                                      if (!draggable) return;
+                                      makeDragImageInvisible(e);
+                                      setDragData({
+                                        rdvId: rdv.id,
+                                        fromDate: dateStr,
+                                        fromHour: hour,
+                                        fromIsVirtual: false,
+                                      });
+                                    }}
+                                  >
+                                    <span className="font-semibold truncate">
+                                      {visual.label}
+                                    </span>
+                                    {visual.showMotif && rdv.motif && (
+                                      <span className="text-[10px] italic truncate">
+                                        {rdv.motif}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="h-full rounded-lg flex items-center justify-center bg-slate-950 border border-slate-900">
+                                    {/* vide */}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </Fragment>
+                      ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       </div>
-    </div>
 
-    {/* MODALE RDV */}
-    <AddSlotModal
-      open={modal.open}
-      date={modal.date}
-      heure={modal.heure}
-      mode={modal.mode}
-      rdvId={modal.rdvId ?? undefined}
-      initialPatientId={modal.initialPatientId ?? undefined}
-      initialTypeConsultation={modal.initialTypeConsultation ?? undefined}
-      medecinId={medecin?.id}
-      onClose={(refresh) => {
-        setModal({
-          open: false,
-          date: "",
-          heure: "",
-          mode: "dayButton",
-          rdvId: null,
-          initialPatientId: null,
-          initialTypeConsultation: null,
-        });
-        if (refresh) fetchPlanning();
-      }}
-    />
-
-    {drawerOpen && (
-      <ScheduleDrawer
-        open={drawerOpen}
-        onClose={() => {
-          setDrawerOpen(false);
-          fetchHoraires();
-          fetchPlanning();
-        }}
+      {/* MODALE RDV */}
+            {/* MODALE RDV */}
+      <AddSlotModal
+        open={modal.open}
+        date={modal.date}
+        heure={modal.heure}
+        mode={modal.mode}
+        rdvId={modal.rdvId ?? undefined}
         medecinId={medecin?.id}
-        initialHoraires={horaires}
-        mode={drawerMode}
-        selectedDay={toISODate(drawerDate)}
-      />
-    )}
-  </div>
-);
+        // ✅ AJOUT : contexte slot pour UI + cohérence
+        typeSlot={
+          (() => {
+            const rdv = getCellRdv(modal.date, modal.heure);
+            const t = (rdv?.typeSlot || "").toUpperCase();
+            return (t as any) || undefined;
+          })()
+        }
+        formulaireDemande={
+          (() => {
+            const rdv = getCellRdv(modal.date, modal.heure) as any;
+            return rdv?.formulaireDemande === true;
+          })()
+        }
+        onClose={(refresh) => {
+          saveScrollPosition();
 
+          setModal({
+            open: false,
+            date: "",
+            heure: "",
+            mode: "dayButton",
+            rdvId: null,
+            initialPatientId: null,
+            initialTypeConsultation: null,
+          });
+
+          if (refresh) {
+            refreshPlanningPreserveScroll();
+          } else {
+            restoreScrollPositionRobust();
+          }
+        }}
+      />
+
+
+      {drawerOpen && (
+        <ScheduleDrawer
+          open={drawerOpen}
+          onClose={() => {
+            setDrawerOpen(false);
+
+            // safe: évite un saut si le drawer déclenche des rerenders
+            refreshPlanningPreserveScroll();
+            fetchHoraires();
+          }}
+          medecinId={medecin?.id}
+          initialHoraires={horaires}
+          mode={drawerMode}
+          selectedDay={toISODate(drawerDate)}
+        />
+      )}
+    </div>
+  );
 }

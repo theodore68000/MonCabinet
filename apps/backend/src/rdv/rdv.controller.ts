@@ -205,6 +205,39 @@ getDisponibilites(
     }
     return this.rdvService.findOne(rdvId);
   }
+  // ───────────────────────────────────────────
+// 📅 META planning médecin (secrétaire)
+// → horaires UNIQUEMENT (lecture)
+// ───────────────────────────────────────────
+@Get('medecin/:id/planning-meta')
+async getMedecinPlanningMeta(
+  @Param('id') id: string,
+) {
+  const medecinId = Number(id);
+  if (isNaN(medecinId)) {
+    throw new BadRequestException('medecinId invalide.');
+  }
+
+  const medecin = await this.rdvService['prisma'].medecin.findUnique({
+    where: { id: medecinId },
+    select: {
+      id: true,
+      horaires: true, // 🔑 CLEF
+    },
+  });
+
+  if (!medecin) {
+    throw new BadRequestException('Médecin introuvable.');
+  }
+
+  return {
+    medecinId: medecin.id,
+    horaires:
+      typeof medecin.horaires === 'string'
+        ? JSON.parse(medecin.horaires)
+        : medecin.horaires,
+  };
+}
 
   // ───────────────────────────────────────────
   // 📌 Update RDV (médecin)
@@ -265,6 +298,65 @@ getDisponibilites(
 
     return this.rdvService.swapSlots(firstId, secondId, 'secretaire');
   }
+  // RDV.CONTROLLER.TS
+
+@Post('move/secretaire')
+moveForSecretaire(
+  @Body()
+  body: {
+    rdvId: number;
+    toDate: string;
+    toHour: string;
+    toMedecinId: number;
+  },
+) {
+  const rdvId = Number(body.rdvId);
+  const toMedecinId = Number(body.toMedecinId);
+
+  if (isNaN(rdvId) || isNaN(toMedecinId)) {
+    throw new BadRequestException('rdvId et toMedecinId doivent être des nombres.');
+  }
+
+  return this.rdvService.moveRdvForSecretaire({
+    rdvId,
+    toDate: body.toDate,
+    toHour: body.toHour,
+    toMedecinId,
+  });
+}
+// ───────────────────────────────────────────
+// 📌 Schedule Drawer — vue journée exhaustive
+// ───────────────────────────────────────────
+@Get('medecin/:id/day')
+getDaySchedule(
+  @Param('id') id: string,
+  @Query('date') date: string,
+) {
+  const medecinId = Number(id);
+  if (isNaN(medecinId)) {
+    throw new BadRequestException('medecinId invalide.');
+  }
+  if (!date) {
+    throw new BadRequestException('date obligatoire (YYYY-MM-DD).');
+  }
+
+  return this.rdvService.getDaySchedule(medecinId, date);
+}
+  // RdvController.ts
+@Delete(':id/hard')
+removeHard(@Param('id') id: string) {
+  const rdvId = Number(id);
+  return this.rdvService.deleteSlotHard(rdvId);
+}
+@Post('schedule/apply')
+applySchedule(@Body() body: {
+  medecinId: number;
+  date: string;
+  start: string;
+  end: string;
+}) {
+  return this.rdvService.applyScheduleInterval(body);
+}
 
   // ───────────────────────────────────────────
   // 📌 Annulation RDV (médecin)
@@ -289,6 +381,22 @@ getDisponibilites(
     }
     return this.rdvService.remove(rdvId, 'secretaire');
   }
+
+// RdvController.ts
+
+@Patch('swap/medecin-view')
+swapByMedecinView(
+  @Body() body: { firstId: number | string; secondId: number | string },
+) {
+  const firstId = Number(body.firstId);
+  const secondId = Number(body.secondId);
+
+  if (isNaN(firstId) || isNaN(secondId)) {
+    throw new BadRequestException('IDs invalides.');
+  }
+
+  return this.rdvService.swapByMedecinView(firstId, secondId);
+}
 
   // ───────────────────────────────────────────
 // 📌 MOVE RDV (médecin) — vers case vide
