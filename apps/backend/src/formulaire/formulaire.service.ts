@@ -78,25 +78,48 @@ export class FormulaireService {
   /**
    * Patient remplit le formulaire
    */
-  async updateFormulaire(rdvId: number, reponses: any) {
-    const existing = await this.prisma.formulairePreconsultation.findUnique({
-      where: { rdvId },
-    });
+async updateFormulaire(
+  rdvId: number,
+  answers: Record<string, any>,
+) {
+  const existing = await this.prisma.formulairePreconsultation.findUnique({
+    where: { rdvId },
+  });
 
-    if (!existing) {
-      throw new NotFoundException(
-        "Formulaire introuvable pour ce rendez-vous.",
-      );
-    }
-
-    return this.prisma.formulairePreconsultation.update({
-      where: { rdvId },
-      data: {
-        reponses,
-        rempli: true,
-      },
-    });
+  if (!existing) {
+    throw new NotFoundException(
+      'Formulaire introuvable pour ce rendez-vous.',
+    );
   }
+
+  return this.prisma.formulairePreconsultation.update({
+    where: { rdvId },
+    data: {
+      reponses: answers,
+      rempli: true,
+    },
+  });
+}
+
+/**
+ * 🧹 Suppression automatique des formulaires après RDV
+ * (le lendemain uniquement)
+ */
+async deleteExpiredFormulaires() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return this.prisma.formulairePreconsultation.deleteMany({
+    where: {
+      rdv: {
+        date: {
+          lt: today,
+        },
+      },
+    },
+  });
+}
+
 
   /**
    * CRON — rappels 24h avant

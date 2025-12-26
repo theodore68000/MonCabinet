@@ -7,6 +7,7 @@ import {
   IsInt,
   ValidateNested,
   IsBoolean,
+  MaxLength,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
@@ -38,8 +39,15 @@ export class CreateRdvDto {
   @IsString()
   heure: string;
 
+  /**
+   * Motif du rendez-vous :
+   * - soit un motif prédéfini
+   * - soit texte libre (si "Autre")
+   * - max 20 caractères
+   */
   @IsOptional()
   @IsString()
+  @MaxLength(20)
   motif?: string | null;
 
   // 🔹 Patient direct
@@ -70,9 +78,7 @@ export class CreateRdvDto {
   @Type(() => PatientIdentityDto)
   patientIdentity?: PatientIdentityDto;
 
-  // ✅ NOUVEAU — décision formulaire
-  // - forcé à true côté patient / proche (logique service)
-  // - optionnel côté médecin (checkbox)
+  // ✅ Décision formulaire
   @IsOptional()
   @IsBoolean()
   formulaireDemande?: boolean;

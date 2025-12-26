@@ -12,6 +12,7 @@ import {
 import { RdvService } from './rdv.service';
 import { CreateRdvDto } from './dto/create-rdv.dto';
 import { UpdateRdvDto } from './dto/update-rdv.dto';
+import { RDV_MOTIFS } from './constants/motifs.constants';
 
 @Controller('rdv')
 export class RdvController {
@@ -43,6 +44,11 @@ export class RdvController {
     return this.rdvService.findAll(medId, patId, proId);
   }
 
+
+  @Get('motifs')
+getMotifs() {
+  return RDV_MOTIFS;
+}
   // ───────────────────────────────────────────
   // 📌 Création RDV (médecin)
   // ───────────────────────────────────────────
@@ -50,10 +56,8 @@ export class RdvController {
   create(@Body() dto: CreateRdvDto) {
     return this.rdvService.create(dto);
   }
-
   // ───────────────────────────────────────────
   // 📌 Création slot libre / bloqué / hors horaires
-  // ✅ FIX : enveloppe la réponse pour le front
   // ───────────────────────────────────────────
   @Post('slot')
   async createSlot(@Body() dto: CreateRdvDto) {
@@ -82,7 +86,6 @@ export class RdvController {
         : 'LIBRE',
     });
 
-    // 🔑 CONTRAT FRONT RESPECTÉ
     return { rdv };
   }
 
@@ -93,30 +96,34 @@ export class RdvController {
   createForPatient(@Body() dto: CreateRdvDto) {
     return this.rdvService.createForPatient(dto);
   }
-  
-  // ───────────────────────────────────────────
-// 📌 UPLOAD / REPLACE (médecin) : overwrite total du créneau
-// ───────────────────────────────────────────
-@Post('upload/medecin')
-uploadReplaceForMedecin(@Body() dto: CreateRdvDto) {
-  return this.rdvService.uploadReplaceForMedecin(dto);
-}
 
- @Get('can-book')
-canBook(
-  @Query('medecinId') medecinId: string,
-  @Query('patientId') patientId?: string,
-  @Query('procheId') procheId?: string,
-) {
-  return this.rdvService.canBook(
-    Number(medecinId),
-    patientId ? Number(patientId) : undefined,
-    procheId ? Number(procheId) : undefined,
-  );
-}
+  // ───────────────────────────────────────────
+  // 📌 Upload / replace total d’un créneau (médecin)
+  // ───────────────────────────────────────────
+  @Post('upload/medecin')
+  uploadReplaceForMedecin(@Body() dto: CreateRdvDto) {
+    return this.rdvService.uploadReplaceForMedecin(dto);
+  }
+
+  // ───────────────────────────────────────────
+  // 📌 Can book (règle métier)
+  // ───────────────────────────────────────────
+  @Get('can-book')
+  canBook(
+    @Query('medecinId') medecinId: string,
+    @Query('patientId') patientId?: string,
+    @Query('procheId') procheId?: string,
+  ) {
+    return this.rdvService.canBook(
+      Number(medecinId),
+      patientId ? Number(patientId) : undefined,
+      procheId ? Number(procheId) : undefined,
+    );
+  }
 
   // ───────────────────────────────────────────
   // 📌 Suppression RDV par patient
+  // (implémentée en delete + create LIBRE côté service)
   // ───────────────────────────────────────────
   @Delete('patient/:id')
   removeForPatient(@Param('id') id: string) {
@@ -127,57 +134,58 @@ canBook(
     return this.rdvService.remove(rdvId, 'patient');
   }
 
+  // ───────────────────────────────────────────
+  // 📌 RDV patient (futurs / passés)
+  // ───────────────────────────────────────────
   @Get('patient/:patientId')
-getForPatient(
-  @Param('patientId') patientId: string,
-  @Query('type') type: 'futurs' | 'passes' = 'futurs',
-) {
-  const id = Number(patientId);
-  if (isNaN(id)) {
-    throw new BadRequestException('patientId invalide.');
+  getForPatient(
+    @Param('patientId') patientId: string,
+    @Query('type') type: 'futurs' | 'passes' = 'futurs',
+  ) {
+    const id = Number(patientId);
+    if (isNaN(id)) {
+      throw new BadRequestException('patientId invalide.');
+    }
+
+    return this.rdvService.getForPatient(id, type);
   }
 
-  return this.rdvService.getForPatient(id, type);
-}
+  // ───────────────────────────────────────────
+  // 📌 Planning médecin (jour / semaine)
+  // ───────────────────────────────────────────
+  @Get('medecin/:id')
+  getByMedecin(
+    @Param('id') id: string,
+    @Query('start') start: string,
+    @Query('end') end: string,
+  ) {
+    return this.rdvService.getByMedecinAndPeriod(
+      Number(id),
+      new Date(start),
+      new Date(end),
+    );
+  }
 
   // ───────────────────────────────────────────
-  // 📌 Planning pour 1 médecin (jour / semaine)
+  // 📌 Disponibilités patient
   // ───────────────────────────────────────────
-@Get('medecin/:id')
-getByMedecin(
-  @Param('id') id: string,
-  @Query('start') start: string,
-  @Query('end') end: string,
-) {
-  return this.rdvService.getByMedecinAndPeriod(
-    Number(id),
-    new Date(start),
-    new Date(end),
-  );
-}
-
-
-  // ───────────────────────────────────────────
-  // 📌 Calendar patient : slots libres
-  // ───────────────────────────────────────────
-@Get('disponibilites')
-getDisponibilites(
-  @Query('medecinId') medecinId: string,
-  @Query('date') date: string,
-  @Query('patientId') patientId?: string,
-  @Query('procheId') procheId?: string,
-) {
-  return this.rdvService.getDisponibilites(
-    Number(medecinId),
-    date,
-    patientId ? Number(patientId) : undefined,
-    procheId ? Number(procheId) : undefined,
-  );
-}
-
+  @Get('disponibilites')
+  getDisponibilites(
+    @Query('medecinId') medecinId: string,
+    @Query('date') date: string,
+    @Query('patientId') patientId?: string,
+    @Query('procheId') procheId?: string,
+  ) {
+    return this.rdvService.getDisponibilites(
+      Number(medecinId),
+      date,
+      patientId ? Number(patientId) : undefined,
+      procheId ? Number(procheId) : undefined,
+    );
+  }
 
   // ───────────────────────────────────────────
-  // 📌 Planning global du cabinet (vue secrétaire)
+  // 📌 Planning cabinet (vue secrétaire)
   // ───────────────────────────────────────────
   @Get('cabinet/:cabinetId/day')
   getPlanningCabinetForDay(
@@ -205,42 +213,23 @@ getDisponibilites(
     }
     return this.rdvService.findOne(rdvId);
   }
+
   // ───────────────────────────────────────────
-// 📅 META planning médecin (secrétaire)
-// → horaires UNIQUEMENT (lecture)
-// ───────────────────────────────────────────
-@Get('medecin/:id/planning-meta')
-async getMedecinPlanningMeta(
-  @Param('id') id: string,
-) {
-  const medecinId = Number(id);
-  if (isNaN(medecinId)) {
-    throw new BadRequestException('medecinId invalide.');
+  // 📅 META planning médecin (lecture seule)
+  // ───────────────────────────────────────────
+  @Get('medecin/:id/planning-meta')
+  async getMedecinPlanningMeta(@Param('id') id: string) {
+    const medecinId = Number(id);
+    if (isNaN(medecinId)) {
+      throw new BadRequestException('medecinId invalide.');
+    }
+
+    return this.rdvService.getMedecinPlanningMeta(medecinId);
   }
-
-  const medecin = await this.rdvService['prisma'].medecin.findUnique({
-    where: { id: medecinId },
-    select: {
-      id: true,
-      horaires: true, // 🔑 CLEF
-    },
-  });
-
-  if (!medecin) {
-    throw new BadRequestException('Médecin introuvable.');
-  }
-
-  return {
-    medecinId: medecin.id,
-    horaires:
-      typeof medecin.horaires === 'string'
-        ? JSON.parse(medecin.horaires)
-        : medecin.horaires,
-  };
-}
 
   // ───────────────────────────────────────────
   // 📌 Update RDV (médecin)
+  // (implémenté en delete + create côté service)
   // ───────────────────────────────────────────
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: UpdateRdvDto) {
@@ -248,7 +237,7 @@ async getMedecinPlanningMeta(
     if (isNaN(rdvId)) {
       throw new BadRequestException('id doit être un nombre.');
     }
-    return (this.rdvService as any).update(rdvId, dto, 'medecin');
+    return this.rdvService.update(rdvId, dto, 'medecin');
   }
 
   // ───────────────────────────────────────────
@@ -260,22 +249,21 @@ async getMedecinPlanningMeta(
     if (isNaN(rdvId)) {
       throw new BadRequestException('id doit être un nombre.');
     }
-    return (this.rdvService as any).update(rdvId, dto, 'secretaire');
+    return this.rdvService.update(rdvId, dto, 'secretaire');
   }
 
   // ───────────────────────────────────────────
   // 📌 Swap RDV (médecin)
   // ───────────────────────────────────────────
   @Patch('swap/medecin')
-  swapByMedecin(@Body() body: { firstId: number | string; secondId: number | string }) {
+  swapByMedecin(
+    @Body() body: { firstId: number | string; secondId: number | string },
+  ) {
     const firstId = Number(body.firstId);
     const secondId = Number(body.secondId);
 
     if (isNaN(firstId) || isNaN(secondId)) {
-      throw new BadRequestException('firstId et secondId doivent être des nombres.');
-    }
-    if (firstId === secondId) {
-      throw new BadRequestException('Les deux RDV doivent être différents.');
+      throw new BadRequestException('IDs invalides.');
     }
 
     return this.rdvService.swapSlots(firstId, secondId, 'medecin');
@@ -285,90 +273,86 @@ async getMedecinPlanningMeta(
   // 📌 Swap RDV (secrétaire)
   // ───────────────────────────────────────────
   @Patch('swap/secretaire')
-  swapBySecretaire(@Body() body: { firstId: number | string; secondId: number | string }) {
+  swapBySecretaire(
+    @Body() body: { firstId: number | string; secondId: number | string },
+  ) {
     const firstId = Number(body.firstId);
     const secondId = Number(body.secondId);
 
     if (isNaN(firstId) || isNaN(secondId)) {
-      throw new BadRequestException('firstId et secondId doivent être des nombres.');
-    }
-    if (firstId === secondId) {
-      throw new BadRequestException('Les deux RDV doivent être différents.');
+      throw new BadRequestException('IDs invalides.');
     }
 
     return this.rdvService.swapSlots(firstId, secondId, 'secretaire');
   }
-  // RDV.CONTROLLER.TS
 
-@Post('move/secretaire')
-moveForSecretaire(
+  // ───────────────────────────────────────────
+  // 📌 Move RDV (secrétaire)
+  // ───────────────────────────────────────────
+  @Post('move/secretaire')
+  moveForSecretaire(
+    @Body()
+    body: {
+      rdvId: number;
+      toDate: string;
+      toHour: string;
+      toMedecinId: number;
+    },
+  ) {
+    return this.rdvService.moveRdvForSecretaire(body);
+  }
+
+  // ───────────────────────────────────────────
+  // 📌 Vue journée exhaustive (drawer)
+  // ───────────────────────────────────────────
+  @Get('medecin/:id/day')
+  getDaySchedule(
+    @Param('id') id: string,
+    @Query('date') date: string,
+  ) {
+    const medecinId = Number(id);
+    if (isNaN(medecinId)) {
+      throw new BadRequestException('medecinId invalide.');
+    }
+    if (!date) {
+      throw new BadRequestException('date obligatoire.');
+    }
+
+    return this.rdvService.getDaySchedule(medecinId, date);
+  }
+
+  // ───────────────────────────────────────────
+  // 📌 Delete HARD (technique)
+  // ───────────────────────────────────────────
+  @Delete(':id/hard')
+  removeHard(@Param('id') id: string) {
+    const rdvId = Number(id);
+    return this.rdvService.deleteSlotHard(rdvId);
+  }
+
+  // ───────────────────────────────────────────
+  // 📌 Apply schedule interval
+  // ───────────────────────────────────────────
+@Post('schedule/apply')
+applySchedule(
   @Body()
   body: {
-    rdvId: number;
-    toDate: string;
-    toHour: string;
-    toMedecinId: number;
+    medecinId: number;
+    date: string;
+    start: string;
+    end: string;
+    typeSlot?: 'LIBRE' | 'BLOQUE';
+    deleteOnly?: boolean;
   },
 ) {
-  const rdvId = Number(body.rdvId);
-  const toMedecinId = Number(body.toMedecinId);
-
-  if (isNaN(rdvId) || isNaN(toMedecinId)) {
-    throw new BadRequestException('rdvId et toMedecinId doivent être des nombres.');
-  }
-
-  return this.rdvService.moveRdvForSecretaire({
-    rdvId,
-    toDate: body.toDate,
-    toHour: body.toHour,
-    toMedecinId,
-  });
-}
-// ───────────────────────────────────────────
-// 📌 Schedule Drawer — vue journée exhaustive
-// ───────────────────────────────────────────
-@Get('medecin/:id/day')
-getDaySchedule(
-  @Param('id') id: string,
-  @Query('date') date: string,
-) {
-  const medecinId = Number(id);
-  if (isNaN(medecinId)) {
-    throw new BadRequestException('medecinId invalide.');
-  }
-  if (!date) {
-    throw new BadRequestException('date obligatoire (YYYY-MM-DD).');
-  }
-
-  return this.rdvService.getDaySchedule(medecinId, date);
-}
-  // RdvController.ts
-@Delete(':id/hard')
-removeHard(@Param('id') id: string) {
-  const rdvId = Number(id);
-  return this.rdvService.deleteSlotHard(rdvId);
-}
-@Post('schedule/apply')
-applySchedule(@Body() body: {
-  medecinId: number;
-  date: string;
-  start: string;
-  end: string;
-}) {
   return this.rdvService.applyScheduleInterval(body);
 }
+
 
   // ───────────────────────────────────────────
   // 📌 Annulation RDV (médecin)
   // ───────────────────────────────────────────
-  @Delete(':id')
-  remove(@Param('id') id: string) {
-    const rdvId = Number(id);
-    if (isNaN(rdvId)) {
-      throw new BadRequestException('id doit être un nombre.');
-    }
-    return this.rdvService.remove(rdvId, 'medecin');
-  }
+
 
   // ───────────────────────────────────────────
   // 📌 Annulation RDV (secrétaire)
@@ -382,48 +366,46 @@ applySchedule(@Body() body: {
     return this.rdvService.remove(rdvId, 'secretaire');
   }
 
-// RdvController.ts
+  // ───────────────────────────────────────────
+  // 📌 Swap vue cabinet
+  // ───────────────────────────────────────────
+  @Patch('swap/medecin-view')
+  swapByMedecinView(
+    @Body() body: { firstId: number | string; secondId: number | string },
+  ) {
+    const firstId = Number(body.firstId);
+    const secondId = Number(body.secondId);
 
-@Patch('swap/medecin-view')
-swapByMedecinView(
-  @Body() body: { firstId: number | string; secondId: number | string },
-) {
-  const firstId = Number(body.firstId);
-  const secondId = Number(body.secondId);
+    if (isNaN(firstId) || isNaN(secondId)) {
+      throw new BadRequestException('IDs invalides.');
+    }
 
-  if (isNaN(firstId) || isNaN(secondId)) {
-    throw new BadRequestException('IDs invalides.');
+    return this.rdvService.swapByMedecinView(firstId, secondId);
   }
-
-  return this.rdvService.swapByMedecinView(firstId, secondId);
-}
 
   // ───────────────────────────────────────────
-// 📌 MOVE RDV (médecin) — vers case vide
-// ───────────────────────────────────────────
-@Post('move/medecin')
-moveForMedecin(
-  @Body()
-  body: {
-    rdvId: number;
-    toDate: string;
-    toHour: string;
-    medecinId: number;
-  },
-) {
-  const rdvId = Number(body.rdvId);
-  const medecinId = Number(body.medecinId);
-
-  if (isNaN(rdvId) || isNaN(medecinId)) {
-    throw new BadRequestException('rdvId et medecinId doivent être des nombres.');
+  // 📌 Move RDV (médecin)
+  // ───────────────────────────────────────────
+  @Post('move/medecin')
+  moveForMedecin(
+    @Body()
+    body: {
+      rdvId: number;
+      toDate: string;
+      toHour: string;
+      medecinId: number;
+    },
+  ) {
+    return this.rdvService.moveRdvForMedecin(body);
   }
 
-  return this.rdvService.moveRdvForMedecin({
-    rdvId,
-    toDate: body.toDate,
-    toHour: body.toHour,
-    medecinId,
-  });
+  @Delete(':id')
+  deleteHard(@Param('id') id: string) {
+  const rdvId = Number(id);
+  if (isNaN(rdvId)) {
+    throw new BadRequestException('id invalide.');
+  }
+  return this.rdvService.deleteHard(rdvId);
 }
 
 }

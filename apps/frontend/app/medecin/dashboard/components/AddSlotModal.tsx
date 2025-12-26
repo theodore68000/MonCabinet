@@ -170,7 +170,7 @@ export default function AddSlotModal({
 
   // visible depuis l’accueil quand créneau PRIS + formulaire demandé + rdvId présent
   const canShowFormPreviewButton =
-    typeSlot === "PRIS" && formulaireDemande === true && Boolean(rdvId);
+    typeSlot === "PRIS" && Boolean(rdvId);
 
   // helper overwrite payload
   const withReplace = (payload: any) => ({
@@ -270,82 +270,109 @@ export default function AddSlotModal({
   };
 
   /**
-   * Annuler = annulation soft (transformation en LIBRE)
-   * -> DELETE /rdv/:id (RdvService.remove)
-   * - Si rdvId est null/undefined (slot déjà virtuel), on ferme simplement.
+   * ✅ NOUVELLE RÈGLE :
+   * Annuler = remettre le créneau à l'état "HORS" (case vide), QUEL QUE SOIT l'état.
+   * - Si rdvId existe : DELETE /rdv/:id (le back recrée en HORS)
+   * - Si rdvId n'existe pas : on force HORS via /rdv/upload/medecin (slot persistant)
    */
-  const handleAnnuler = async () => {
-    if (!rdvId) {
-      onClose(false);
+const handleAnnuler = async () => {
+  // ✅ case déjà vierge → rien à faire
+  if (!rdvId) {
+    onClose(true);
+    return;
+  }
+
+  try {
+    const res = await fetch(`http://localhost:3001/rdv/${rdvId}`, {
+      method: "DELETE",
+    });
+
+    if (!res.ok) {
+      setError("Impossible d’annuler ce créneau.");
       return;
     }
 
-    try {
-      const res = await fetch(`http://localhost:3001/rdv/${rdvId}`, {
-        method: "DELETE",
-      });
+    // 🔑 DELETE HARD → la case redevient vierge
+    onClose(true);
+  } catch {
+    setError("Erreur serveur.");
+  }
+};
 
-      if (!res.ok) return setError("Impossible d’annuler ce rendez-vous.");
-      onClose(true);
-    } catch {
-      setError("Erreur serveur.");
-    }
-  };
 
-  const handleSave = async () => {
-    if (!medecinId) return setError("Médecin introuvable.");
+const handleSave = async () => {
+  if (!medecinId) {
+    setError("Médecin introuvable.");
+    return;
+  }
 
-    if (patientMode === "csv" && !selectedCsvPatient)
-      return setError("Sélectionnez un patient.");
-    if (patientMode === "hors" && (!horsNom || !horsPrenom))
-      return setError("Nom et prénom requis.");
+  // ⛔ RÈGLE CRITIQUE :
+  // Case vierge + aucun patient sélectionné = INTERDIT
+  if (!rdvId && patientMode === "none") {
+    setError("Veuillez sélectionner un patient ou une action (bloquer / libérer).");
+    return;
+  }
 
-    const { finalDate, finalHeure } = computeFinalDateHeure();
+  if (patientMode === "csv" && !selectedCsvPatient) {
+    setError("Sélectionnez un patient.");
+    return;
+  }
 
-    const payload: any = withReplace({
-      medecinId,
-      date: finalDate,
-      heure: finalHeure,
-      typeSlot: "PRIS",
-      typeConsultation,
-      formulaireDemande: formulaireDemande === true,
+  if (patientMode === "hors" && (!horsNom || !horsPrenom)) {
+    setError("Nom et prénom requis.");
+    return;
+  }
+
+  const { finalDate, finalHeure } = computeFinalDateHeure();
+
+  const payload: any = withReplace({
+    medecinId,
+    date: finalDate,
+    heure: finalHeure,
+    typeSlot: "PRIS", // ✅ uniquement si patient présent
+    typeConsultation,
+    formulaireDemande: formulaireDemande === true,
+  });
+
+  // Patient CSV
+  if (patientMode === "csv" && selectedCsvPatient) {
+    payload.patientId = selectedCsvPatient.id;
+    payload.patientIdentity = {
+      source: "CSV",
+      nom: selectedCsvPatient.nom,
+      prenom: selectedCsvPatient.prenom,
+      dateNaissance: selectedCsvPatient.dateNaissance,
+    };
+  }
+
+  // Patient hors cabinet
+  if (patientMode === "hors") {
+    payload.patientIdentity = {
+      source: "HORS",
+      nom: horsNom,
+      prenom: horsPrenom,
+    };
+  }
+
+  try {
+    const res = await fetch("http://localhost:3001/rdv/upload/medecin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
-    if (patientMode === "csv" && selectedCsvPatient) {
-      payload.patientId = selectedCsvPatient.id;
-      payload.patientIdentity = {
-        source: "CSV",
-        nom: selectedCsvPatient.nom,
-        prenom: selectedCsvPatient.prenom,
-        dateNaissance: selectedCsvPatient.dateNaissance,
-      };
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      setError(data?.message || "Erreur lors de l'enregistrement.");
+      return;
     }
 
-    if (patientMode === "hors") {
-      payload.patientIdentity = {
-        source: "HORS",
-        nom: horsNom,
-        prenom: horsPrenom,
-      };
-    }
+    onClose(true);
+  } catch {
+    setError("Erreur serveur.");
+  }
+};
 
-    try {
-      const res = await fetch("http://localhost:3001/rdv/upload/medecin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        return setError(data?.message || "Erreur lors de l'enregistrement.");
-      }
-
-      onClose(true);
-    } catch {
-      setError("Erreur serveur.");
-    }
-  };
 
   /* -------------------------------------------------------
      RENDER
@@ -353,7 +380,8 @@ export default function AddSlotModal({
   if (!open) return null;
 
   // UI inchangée : on garde le disable libre si PRIS (si tu veux le retirer, mets false)
-  const libreDisabled = typeSlot === "PRIS";
+const libreDisabled = false;
+
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -456,7 +484,7 @@ export default function AddSlotModal({
             <div className="max-h-32 overflow-y-auto space-y-1">
               {filteredCsvPatients.map((p) => (
                 <button
-                  key={p.id}
+                  key={`${p.id}-${p.nom}-${p.prenom}-${p.dateNaissance}`}
                   onClick={(e) => {
                     e.currentTarget.blur();
                     setSelectedCsvPatient(p);

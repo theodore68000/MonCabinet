@@ -10,6 +10,9 @@ import FullCalendar, {
 import timeGridPlugin from "@fullcalendar/timegrid";
 import interactionPlugin from "@fullcalendar/interaction";
 
+// ✅ NEW
+import MotifRdvModal from "./components/MotifRdvModal";
+
 type RdvEvent = {
   id: string;
   title: string;
@@ -31,7 +34,7 @@ type BookingTarget =
 
 type NextDispoDay = {
   date: string; // YYYY-MM-DD
-  hours: string[]; // ["08:00","08:15",...]
+  hours: string[]; // ["08:00","08:15",]
 };
 
 export default function RdvPage() {
@@ -73,6 +76,16 @@ export default function RdvPage() {
 
   const calendarRef = useRef<any>(null);
 
+  // ✅ NEW : gestion modale motif + slot en attente
+  const [motifModalOpen, setMotifModalOpen] = useState<boolean>(false);
+  const [pendingSlot, setPendingSlot] = useState<{
+    date: string;
+    heure: string;
+  } | null>(null);
+
+  // ✅ FIX (changement) : proche courant chargé (si for=proche)
+  const [currentProche, setCurrentProche] = useState<any>(null);
+
   // ✅ helper: reset cohérent des états dépendants du contexte
   const resetContextStates = () => {
     setFutureRdv(null);
@@ -86,6 +99,13 @@ export default function RdvPage() {
     setLoadingNextDispos(false);
 
     setLoadingExistingRdv(false);
+
+    // ✅ NEW
+    setMotifModalOpen(false);
+    setPendingSlot(null);
+
+    // ✅ FIX (changement)
+    setCurrentProche(null);
   };
 
   const formatDateLocal = (d: Date): string => {
@@ -111,6 +131,10 @@ export default function RdvPage() {
     return `procheId=${target.procheId}`;
   };
 
+  // ✅ FIX CRITIQUE : canBook contrôle UNIQUEMENT la réservation (dispos + clic),
+  // jamais l’accès à un RDV existant.
+  const canSeeDispos = contextReady && canBook === true && !futureRdv;
+
   // ✅ NEW : récupère les 5 prochains JOURS avec au moins une dispo (et les heures de chaque jour)
   // maxLookahead protège en cas de planning vide
   async function fetchNextAvailableDays(
@@ -120,7 +144,7 @@ export default function RdvPage() {
     // ✅ FIX: attendre contexte stable
     if (!contextReady) return [];
     if (!medecinId || !patient || !bookingTarget || futureRdv) return [];
-    if (canBook === false) return [];
+    if (!canSeeDispos) return [];
 
     const resDays: NextDispoDay[] = [];
     const now = new Date();
@@ -207,6 +231,20 @@ export default function RdvPage() {
     if (mId) setMedecinId(Number(mId));
   }, []);
 
+  // ✅ FIX (changement) : fetch proche (si for=proche)
+  async function fetchProcheById(procheId: number) {
+    try {
+      const res = await fetch(`http://localhost:3001/proche/${procheId}`);
+      if (!res.ok) throw new Error("proche fetch failed");
+      const data = await res.json();
+      setCurrentProche(data);
+    } catch {
+      // on ne bloque pas la page, mais on perd le match identité
+      // et on garde ton fallback "HAS_FUTURE_RDV" UI sans détails.
+      setCurrentProche(null);
+    }
+  }
+
   // ---------------------------------------------------------------------
   // ✅ calculer bookingTarget
   // - IMPORTANT : si for=proche MAIS procheId manquant => on ne fallback PAS en patient
@@ -244,6 +282,10 @@ export default function RdvPage() {
       }
 
       setBookingTarget({ type: "proche", procheId });
+
+      // ✅ FIX (changement)
+      fetchProcheById(procheId);
+
       setContextReady(true);
       return;
     }
@@ -337,26 +379,83 @@ export default function RdvPage() {
     return null;
   };
 
-  const pickFutureFromList = (rdvs: any[], now: Date, target: BookingTarget) => {
+  // ✅ NEW helper : normalisation simple texte (pour match patientIdentity)
+  const normalizeText = (v: any): string =>
+    (v ?? "")
+      .toString()
+      .trim()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+
+  // ✅ FIX: pickFutureFromList aligné avec la logique backend :
+  // - patient : match direct via patientId OU via patientIdentity (RDV créé par médecin/secrétaire/CSV)
+  // - proche : match via procheId OU via patientIdentity (si proche chargé)
+  const pickFutureFromList = (
+    rdvs: any[],
+    now: Date,
+    target: BookingTarget,
+    patientObj: any,
+    procheObj?: any
+  ) => {
     for (const r of rdvs) {
       if (!r?.date || !r?.heure) continue;
 
-      // 🔒 sécurité proche: procheId DOIT matcher si on est en mode proche
-      if (target.type === "proche") {
-        const prid = r?.procheId ?? null;
-        if (!prid || Number(prid) !== Number(target.procheId)) continue;
-      }
+      const [h, m] = String(r.heure).split(":").map(Number);
+      if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
 
       const full = new Date(r.date);
-      const [h, m] = String(r.heure).split(":").map(Number);
-      if (Number.isFinite(h) && Number.isFinite(m)) {
-        full.setHours(h, m, 0, 0);
-      } else {
-        continue;
+      full.setHours(h, m, 0, 0);
+      if (full < now) continue;
+
+      // ─────────────────────────────────────────
+      // 👤 PATIENT
+      // ─────────────────────────────────────────
+      if (target.type === "patient") {
+        const directMatch =
+          r.patientId != null &&
+          Number(r.patientId) === Number(target.patientId);
+
+        const identityMatch =
+          !!r.patientIdentity &&
+          !!patientObj &&
+          normalizeText(r.patientIdentity.nom) === normalizeText(patientObj.nom) &&
+          normalizeText(r.patientIdentity.prenom) ===
+            normalizeText(patientObj.prenom);
+
+        if (!directMatch && !identityMatch) continue;
+
+        return r;
       }
 
-      if (full >= now) return r;
+      // ─────────────────────────────────────────
+      // 👪 PROCHE
+      // ─────────────────────────────────────────
+      if (target.type === "proche") {
+        // 1️⃣ match direct procheId (cas normal)
+        if (
+          r.procheId != null &&
+          Number(r.procheId) === Number(target.procheId)
+        ) {
+          return r;
+        }
+
+        // 2️⃣ match identité proche (RDV créé par médecin/secrétaire) — nécessite currentProche
+        if (
+          !r.procheId &&
+          r.patientIdentity &&
+          procheObj &&
+          normalizeText(r.patientIdentity.nom) === normalizeText(procheObj.nom) &&
+          normalizeText(r.patientIdentity.prenom) ===
+            normalizeText(procheObj.prenom)
+        ) {
+          return r;
+        }
+
+        continue;
+      }
     }
+
     return null;
   };
 
@@ -364,7 +463,6 @@ export default function RdvPage() {
   // Vérifier RDV futur (pour la cible) - FIX ROBUSTE
   // ---------------------------------------------------------------------
   async function checkFutureRdv() {
-    // ✅ FIX: attendre contexte stable
     if (!contextReady) return;
     if (!patient || !medecinId || !bookingTarget) return;
 
@@ -372,14 +470,16 @@ export default function RdvPage() {
 
     const urls: string[] = [];
 
-    // 1) requête ciblée
+    // 1️⃣ requête ciblée (patientId / procheId)
     urls.push(
       `http://localhost:3001/rdv?medecinId=${medecinId}&${buildTargetQueryString(
         bookingTarget
       )}`
     );
 
-    // 2) vue patient owner (RDV proches créés par médecin/secrétaire)
+    // 2️⃣ ✅ FIX CRITIQUE
+    // Cette vue est la SEULE qui remonte les RDV créés par médecin/secrétaire
+    // quand patientId est NULL mais patientIdentity renseignée
     urls.push(
       `http://localhost:3001/patient/${patient.id}/rdv?medecinId=${medecinId}`
     );
@@ -394,14 +494,22 @@ export default function RdvPage() {
         const list = coerceRdvList(data);
         if (!list) continue;
 
-        // filtre médecin si besoin
+        // filtre médecin si nécessaire
         const filtered = list.filter((r: any) => {
           const mid = r?.medecinId ?? r?.medecin?.id;
           if (!mid) return true;
           return Number(mid) === Number(medecinId);
         });
 
-        const found = pickFutureFromList(filtered, now, bookingTarget);
+        // ✅ FIX (changement) : passer patient + currentProche
+        const found = pickFutureFromList(
+          filtered,
+          now,
+          bookingTarget,
+          patient,
+          currentProche
+        );
+
         if (found) {
           setFutureRdv(found);
           return;
@@ -419,14 +527,13 @@ export default function RdvPage() {
     if (!contextReady) return;
     checkFutureRdv();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextReady, patient, medecinId, bookingTarget]);
+  }, [contextReady, patient, medecinId, bookingTarget, currentProche]);
 
   // ---------------------------------------------------------------------
   // ✅ fallback : si le back dit HAS_FUTURE_RDV mais checkFutureRdv ne trouve rien
   // FIX : on doit aussi le lancer automatiquement quand on arrive sur la page
   // ---------------------------------------------------------------------
   async function fetchExistingFutureRdvFallback() {
-    // ✅ FIX: attendre contexte stable
     if (!contextReady) return;
     if (!patient || !medecinId || !bookingTarget) return;
     if (futureRdv) return;
@@ -437,20 +544,20 @@ export default function RdvPage() {
 
     const candidates: string[] = [];
 
-    // 1) requête ciblée
+    // 1️⃣ requête ciblée
     candidates.push(
       `http://localhost:3001/rdv?medecinId=${medecinId}&${buildTargetQueryString(
         bookingTarget
       )}`
     );
 
-    // 2) patient owner listings
+    // 2️⃣ ✅ FIX CRITIQUE — même logique que checkFutureRdv
     candidates.push(
       `http://localhost:3001/patient/${patient.id}/rdv?medecinId=${medecinId}`
     );
     candidates.push(`http://localhost:3001/patient/${patient.id}/rdv`);
 
-    // 3) endpoints historiques (conservés)
+    // 3️⃣ endpoints historiques conservés (au cas où)
     if (bookingTarget.type === "patient") {
       candidates.push(
         `http://localhost:3001/rdv/patient/${patient.id}?medecinId=${medecinId}`
@@ -483,14 +590,22 @@ export default function RdvPage() {
             return Number(mid) === Number(medecinId);
           });
 
-          const found = pickFutureFromList(filtered, now, bookingTarget);
+          // ✅ FIX (changement) : passer patient + currentProche
+          const found = pickFutureFromList(
+            filtered,
+            now,
+            bookingTarget,
+            patient,
+            currentProche
+          );
+
           if (found) {
             setFutureRdv(found);
             setLoadingExistingRdv(false);
             return;
           }
         } catch {
-          // ignore
+          // ignore et continue
         }
       }
     } finally {
@@ -517,6 +632,7 @@ export default function RdvPage() {
     medecinId,
     bookingTarget,
     futureRdv,
+    currentProche,
   ]);
 
   // ---------------------------------------------------------------------
@@ -526,7 +642,7 @@ export default function RdvPage() {
     // ✅ FIX: attendre contexte stable
     if (!contextReady) return;
     if (!medecinId || !patient || !bookingTarget || futureRdv) return;
-    if (canBook === false) return;
+    if (!canSeeDispos) return;
 
     setAccessError(null);
     const all: RdvEvent[] = [];
@@ -581,7 +697,7 @@ export default function RdvPage() {
     if (!contextReady) return;
 
     if (!medecinId || futureRdv) return;
-    if (canBook === false || canBook === null) return;
+    if (!canSeeDispos) return;
 
     await loadRange(arg.start, arg.end);
   }
@@ -591,7 +707,7 @@ export default function RdvPage() {
     if (!contextReady) return;
 
     if (!medecinId || futureRdv) return;
-    if (canBook === false || canBook === null) return;
+    if (!canSeeDispos) return;
 
     const api: CalendarApi | undefined = calendarRef.current?.getApi();
     if (!api) return;
@@ -601,53 +717,17 @@ export default function RdvPage() {
   }, [contextReady, medecinId, futureRdv, canBook, bookingTarget]);
 
   // ---------------------------------------------------------------------
-  // CLIC SUR CRÉNEAU
+  // ✅ NEW : créer RDV (utilisé par calendrier + prochaines dispos)
   // ---------------------------------------------------------------------
-  async function handleEventClick(info: EventClickArg) {
-    // ✅ FIX: attendre contexte stable
-    if (!contextReady) {
-      alert("Chargement en cours, veuillez réessayer.");
-      return;
-    }
+  async function createRdvWithMotif(motif: string) {
+    // garde-fous
+    if (!contextReady) return;
+    if (accessError || canBook !== true) return;
+    if (!patient || !bookingTarget || !medecinId) return;
+    if (!pendingSlot) return;
+    if (futureRdv) return;
 
-    if (accessError || canBook === false) {
-      alert(
-        accessError ??
-          "Vous ne pouvez pas prendre de rendez-vous avec ce médecin."
-      );
-      return;
-    }
-
-    if (!patient) {
-      alert("Vous devez être connecté en tant que patient pour réserver.");
-      return;
-    }
-
-    if (!bookingTarget) {
-      alert("Cible de rendez-vous non définie.");
-      return;
-    }
-
-    if (futureRdv) {
-      alert("Vous avez déjà un rendez-vous avec ce médecin.");
-      return;
-    }
-
-    if (!medecinId) {
-      alert("Médecin non sélectionné.");
-      return;
-    }
-
-    const start = info.event.start;
-    if (!start) return;
-
-    const dateStr = formatDateLocal(start);
-    const heure = start.toTimeString().slice(0, 5);
-
-    const motif = prompt(
-      `Prendre rendez-vous le ${dateStr} à ${heure}\n\nMotif :`
-    );
-    if (!motif) return;
+    const { date, heure } = pendingSlot;
 
     try {
       const createUrl =
@@ -659,7 +739,7 @@ export default function RdvPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          date: dateStr,
+          date,
           heure,
           motif,
           medecinId: medecinId,
@@ -674,6 +754,7 @@ export default function RdvPage() {
       const data = await res.json();
 
       if (!res.ok) {
+        // mêmes cas que ton code d'origine
         if (res.status === 403) {
           setCanBook(false);
           setCanBookReason("CSV_GATE");
@@ -711,10 +792,69 @@ export default function RdvPage() {
 
       // ✅ NEW : vider les prochaines dispos (plus pertinent car plus bookable)
       setNextDispos([]);
+
+      // ✅ fermer modale + reset pending
+      setMotifModalOpen(false);
+      setPendingSlot(null);
+
+      // (optionnel) recharger le planning si le calendrier est monté
+      const api: CalendarApi | undefined = calendarRef.current?.getApi();
+      if (api && medecinId) {
+        loadRange(api.view.activeStart, api.view.activeEnd);
+      }
     } catch (error) {
       console.error(error);
       alert("Erreur lors de la réservation.");
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // CLIC SUR CRÉNEAU
+  // ---------------------------------------------------------------------
+  async function handleEventClick(info: EventClickArg) {
+    // ✅ FIX: attendre contexte stable
+    if (!contextReady) {
+      alert("Chargement en cours, veuillez réessayer.");
+      return;
+    }
+
+    if (accessError || canBook !== true) {
+      alert(
+        accessError ??
+          "Vous ne pouvez pas prendre de rendez-vous avec ce médecin."
+      );
+      return;
+    }
+
+    if (!patient) {
+      alert("Vous devez être connecté en tant que patient pour réserver.");
+      return;
+    }
+
+    if (!bookingTarget) {
+      alert("Cible de rendez-vous non définie.");
+      return;
+    }
+
+    if (futureRdv) {
+      alert("Vous avez déjà un rendez-vous avec ce médecin.");
+      return;
+    }
+
+    if (!medecinId) {
+      alert("Médecin non sélectionné.");
+      return;
+    }
+
+    const start = info.event.start;
+    if (!start) return;
+
+    const dateStr = formatDateLocal(start);
+    const heure = start.toTimeString().slice(0, 5);
+
+    // ✅ NEW : ouvrir modale motif au lieu de prompt()
+    setPendingSlot({ date: dateStr, heure });
+    setMotifModalOpen(true);
   }
 
   // ---------------------------------------------------------------------
@@ -755,7 +895,6 @@ export default function RdvPage() {
       alert("Erreur.");
     }
   }
-
   // ---------------------------------------------------------------------
   // Si bookingTarget impossible (ex: procheId manquant), on affiche erreur
   // ---------------------------------------------------------------------
@@ -921,7 +1060,7 @@ export default function RdvPage() {
             onClick={async () => {
               if (!contextReady) return;
               if (!medecinId || !bookingTarget || futureRdv) return;
-              if (canBook === false || canBook === null) return;
+              if (!canSeeDispos) return;
 
               setLoadingNextDispos(true);
               setNextDispos([]);
@@ -994,7 +1133,7 @@ export default function RdvPage() {
                             return;
                           }
 
-                          if (accessError || canBook === false) {
+                          if (accessError || canBook !== true) {
                             alert(
                               accessError ??
                                 "Vous ne pouvez pas prendre de rendez-vous avec ce médecin."
@@ -1022,98 +1161,9 @@ export default function RdvPage() {
                             return;
                           }
 
-                          const motif = prompt(
-                            `Prendre rendez-vous le ${d.date} à ${h}\n\nMotif :`
-                          );
-                          if (!motif) return;
-
-                          try {
-                            const createUrl =
-                              bookingTarget.type === "patient"
-                                ? `http://localhost:3001/patient/${patient.id}/rdv`
-                                : `http://localhost:3001/rdv/patient`;
-
-                            const res = await fetch(createUrl, {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                date: d.date,
-                                heure: h,
-                                motif,
-                                medecinId: medecinId,
-                                typeConsultation: "PRESENTIEL",
-
-                                ...(bookingTarget.type === "patient"
-                                  ? {
-                                      patientId: bookingTarget.patientId,
-                                      procheId: null,
-                                    }
-                                  : {
-                                      procheId: bookingTarget.procheId,
-                                      patientId: null,
-                                    }),
-                              }),
-                            });
-
-                            const data = await res.json();
-
-                            if (!res.ok) {
-                              if (res.status === 403) {
-                                setCanBook(false);
-                                setCanBookReason("CSV_GATE");
-                                setAccessError(
-                                  data?.message ||
-                                    "Vous ne pouvez pas prendre de rendez-vous avec ce médecin."
-                                );
-                                setEvents([]);
-                              }
-
-                              if (
-                                typeof data?.message === "string" &&
-                                data.message
-                                  .toLowerCase()
-                                  .includes("déjà un rendez-vous")
-                              ) {
-                                setCanBook(false);
-                                setCanBookReason("HAS_FUTURE_RDV");
-                                setAccessError(
-                                  "Vous avez déjà un rendez-vous avec ce médecin."
-                                );
-                                try {
-                                  await checkFutureRdv();
-                                  await fetchExistingFutureRdvFallback();
-                                } catch {}
-                              }
-
-                              alert(
-                                data?.message ||
-                                  "Erreur lors de la réservation."
-                              );
-
-                              try {
-                                await checkFutureRdv();
-                              } catch {}
-
-                              return;
-                            }
-
-                            alert("Rendez-vous réservé !");
-                            setFutureRdv(data);
-
-                            setNextDispos([]);
-
-                            const api: CalendarApi | undefined =
-                              calendarRef.current?.getApi();
-                            if (api && medecinId) {
-                              loadRange(
-                                api.view.activeStart,
-                                api.view.activeEnd
-                              );
-                            }
-                          } catch (error) {
-                            console.error(error);
-                            alert("Erreur lors de la réservation.");
-                          }
+                          // ✅ NEW : ouvrir modale motif au lieu de prompt()
+                          setPendingSlot({ date: d.date, heure: h });
+                          setMotifModalOpen(true);
                         }}
                         className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
                       >
@@ -1126,9 +1176,7 @@ export default function RdvPage() {
             </div>
 
             {nextDispos.length === 0 && (
-              <div className="text-gray-600">
-                Aucune disponibilité trouvée.
-              </div>
+              <div className="text-gray-600">Aucune disponibilité trouvée.</div>
             )}
           </div>
         )}
@@ -1179,6 +1227,16 @@ export default function RdvPage() {
           day: "2-digit",
           month: "2-digit",
         }}
+      />
+
+      {/* ✅ NEW : MODALE MOTIF */}
+      <MotifRdvModal
+        open={motifModalOpen}
+        onClose={() => {
+          setMotifModalOpen(false);
+          setPendingSlot(null);
+        }}
+        onConfirm={(motif) => createRdvWithMotif(motif)}
       />
     </div>
   );

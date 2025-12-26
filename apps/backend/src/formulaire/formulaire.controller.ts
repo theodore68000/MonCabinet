@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 
 import { FormulaireService } from './formulaire.service';
-import { CreateFormulaireDto } from './dto/create-formulaire.dto';
+import { UpdateFormulaireDto } from './dto/update-formulaire.dto';
 import { PrismaService } from '../prisma/prisma.service';
 
 @Controller('formulaire')
@@ -46,16 +46,16 @@ export class FormulaireController {
    * Le patient remplit le formulaire.
    * On stocke directement toutes les propriétés du DTO dans `reponses`.
    */
-  @Post(':rdvId')
-  async updateFormulaire(
-    @Param('rdvId', ParseIntPipe) rdvId: number,
-    @Body() dto: CreateFormulaireDto,
-  ) {
-    if (!dto) {
-      throw new NotFoundException('Aucune donnée envoyée');
-    }
+@Post(':rdvId')
+async updateFormulaire(
+  @Param('rdvId', ParseIntPipe) rdvId: number,
+  @Body() dto: { answers: Record<string, any> },
+) {
+  return this.formulaireService.updateFormulaire(
+    rdvId,
+    dto.answers,
+  );
+}
 
-    // DTO → enregistré comme bloc JSON
-    return this.formulaireService.updateFormulaire(rdvId, dto);
-  }
+
 }

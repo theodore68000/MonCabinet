@@ -112,7 +112,106 @@ export class RdvService {
     return raw === 'VISIO' ? 'VISIO' : 'PRESENTIEL';
   }
 
-  private async assertPatientExists(patientId: number | null): Promise<void> {
+  
+
+  // ------------------------------------------------------------------
+  // IMMUTABILITÉ RDV
+  // Toute modification/swap/move/libération = DELETE + CREATE
+  // ------------------------------------------------------------------
+
+  private toDateOnlyUTC(input: Date): Date {
+    const ymd = input.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    return new Date(`${ymd}T00:00:00.000Z`);
+  }
+
+  private buildCreateDtoFromRdv(rdv: any): CreateRdvDto {
+    return {
+      date: this.toDateOnlyUTC(new Date(rdv.date)).toISOString().slice(0, 10),
+      heure: rdv.heure,
+      motif: rdv.motif ?? null,
+      patientId: rdv.patientId ?? null,
+      procheId: rdv.procheId ?? null,
+      medecinId: rdv.medecinId,
+      typeConsultation: this.normalizeConsultationType(rdv.typeConsultation),
+      typeSlot: this.normalizeTypeSlot(rdv.typeSlot),
+      patientIdentity: (rdv.patientIdentity ?? undefined) as any,
+      formulaireDemande: rdv.formulaireDemande === true,
+    };
+  }
+
+private async replaceRdvByDeleteCreate(params: {
+  tx: Prisma.TransactionClient;
+  sourceId: number;
+  override: Partial<CreateRdvDto>;
+}) {
+  const { tx, sourceId, override } = params;
+
+  const source = await tx.rendezVous.findUnique({
+    where: { id: sourceId },
+    include: { patient: true, proche: true, medecin: true, formulaire: true },
+  });
+
+  if (!source) {
+    throw new NotFoundException('RDV introuvable.');
+  }
+
+  // 🔒 base = source COMPLET
+  const base = this.buildCreateDtoFromRdv(source);
+
+  // 🔥 FIX : héritage explicite date / heure
+  const nextDate = override.date ?? base.date;
+  const nextHeure = override.heure ?? base.heure;
+
+  const nextTypeSlot =
+    override.typeSlot !== undefined
+      ? this.normalizeTypeSlot(override.typeSlot)
+      : this.normalizeTypeSlot(base.typeSlot);
+
+  // ⛔ GARDE-FOU ABSOLU
+  if (nextTypeSlot === 'PRIS') {
+    if (!nextDate || !nextHeure) {
+      throw new BadRequestException(
+        'RDV PRIS invalide : date et heure obligatoires.',
+      );
+    }
+  }
+
+  // DELETE CASCADE
+  await this.deleteRdvCascade(tx, sourceId);
+
+  const created = await tx.rendezVous.create({
+    data: {
+      medecinId: Number(base.medecinId),
+      date: new Date(`${nextDate}T00:00:00.000Z`),
+      heure: nextHeure,
+      motif: override.motif ?? base.motif ?? null,
+      typeSlot: nextTypeSlot,
+      typeConsultation:
+        override.typeConsultation !== undefined
+          ? this.normalizeConsultationType(override.typeConsultation)
+          : this.normalizeConsultationType(base.typeConsultation),
+      patientId:
+        override.patientId !== undefined ? override.patientId : base.patientId,
+      procheId:
+        override.procheId !== undefined ? override.procheId : base.procheId,
+      patientIdentity:
+        override.patientIdentity !== undefined
+          ? (override.patientIdentity as any)
+          : (base.patientIdentity as any),
+      formulaireDemande:
+        override.formulaireDemande !== undefined
+          ? override.formulaireDemande
+          : base.formulaireDemande,
+    },
+    include: { patient: true, proche: true, medecin: true, formulaire: true },
+  });
+
+  return { source, created };
+}
+
+
+
+private async assertPatientExists(patientId: number | null): Promise<void> {
     if (!patientId) return;
     const patient = await this.prisma.patient.findUnique({
       where: { id: patientId },
@@ -184,6 +283,28 @@ export class RdvService {
   return found?.id ?? null;
 }
 
+private async deleteRdvCascade(
+  tx: Prisma.TransactionClient,
+  rdvId: number,
+) {
+  // 1️⃣ Formulaire
+  await tx.formulairePreconsultation.deleteMany({
+    where: { rdvId },
+  });
+
+  // 2️⃣ Paiement (⚠️ FK = rendezVousId)
+  await tx.paiement.deleteMany({
+    where: { rendezVousId: rdvId },
+  });
+
+  // 3️⃣ RDV
+  await tx.rendezVous.delete({
+    where: { id: rdvId },
+  });
+}
+
+
+
 private async getIdentityForBooking(
   patientId: number | null,
   procheId: number | null,
@@ -234,18 +355,10 @@ private async getIdentityForBooking(
 }
 
 private async swapInternal(firstId: number, secondId: number) {
-  // ───────────────────────────────────────────
-  // Guards de base
-  // ───────────────────────────────────────────
   if (firstId === secondId) {
-    throw new BadRequestException(
-      'Impossible de swap un RDV avec lui-même.',
-    );
+    throw new BadRequestException('Impossible de swap un RDV avec lui-même.');
   }
 
-  // ───────────────────────────────────────────
-  // Chargement des deux RDV
-  // ───────────────────────────────────────────
   const [a, b] = await this.prisma.$transaction([
     this.prisma.rendezVous.findUnique({ where: { id: firstId } }),
     this.prisma.rendezVous.findUnique({ where: { id: secondId } }),
@@ -255,53 +368,55 @@ private async swapInternal(firstId: number, secondId: number) {
     throw new NotFoundException('RDV introuvable.');
   }
 
-  // ───────────────────────────────────────────
-  // 🔁 SWAP COMPLET ET COHÉRENT
-  // (obligatoire pour vue cabinet inter-médecins)
-  // ───────────────────────────────────────────
-  await this.prisma.$transaction([
-    this.prisma.rendezVous.update({
-      where: { id: a.id },
-      data: {
-        // position
-        date: b.date,
-        heure: b.heure,
-        medecinId: b.medecinId, // ✅ CRITIQUE
+  const posA: Partial<CreateRdvDto> = {
+    date: this.toDateOnlyUTC(new Date(a.date)).toISOString().slice(0, 10),
+    heure: a.heure,
+    ...(a.medecinId != null ? { medecinId: a.medecinId } : {}),
+  };
 
-        // contenu
-        patientId: b.patientId,
-        procheId: b.procheId,
-        patientIdentity: b.patientIdentity as Prisma.InputJsonValue,
-        motif: b.motif,
+  const posB: Partial<CreateRdvDto> = {
+    date: this.toDateOnlyUTC(new Date(b.date)).toISOString().slice(0, 10),
+    heure: b.heure,
+    ...(b.medecinId != null ? { medecinId: b.medecinId } : {}),
+  };
 
-        // état
+  await this.prisma.$transaction(async (tx) => {
+    await this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: a.id,
+      override: {
+        ...posB,
+        patientId: b.patientId ?? null,
+        procheId: b.procheId ?? null,
+        patientIdentity: (b.patientIdentity ?? undefined) as any,
+        motif: b.motif ?? null,
         typeSlot: b.typeSlot,
-        typeConsultation: b.typeConsultation,
+        typeConsultation: this.normalizeConsultationType(b.typeConsultation),
+        formulaireDemande: b.formulaireDemande === true,
       },
-    }),
-    this.prisma.rendezVous.update({
-      where: { id: b.id },
-      data: {
-        // position
-        date: a.date,
-        heure: a.heure,
-        medecinId: a.medecinId, // ✅ CRITIQUE
+    });
 
-        // contenu
-        patientId: a.patientId,
-        procheId: a.procheId,
-        patientIdentity: a.patientIdentity as Prisma.InputJsonValue,
-        motif: a.motif,
-
-        // état
+    await this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: b.id,
+      override: {
+        ...posA,
+        patientId: a.patientId ?? null,
+        procheId: a.procheId ?? null,
+        patientIdentity: (a.patientIdentity ?? undefined) as any,
+        motif: a.motif ?? null,
         typeSlot: a.typeSlot,
-        typeConsultation: a.typeConsultation,
+        typeConsultation: this.normalizeConsultationType(a.typeConsultation),
+        formulaireDemande: a.formulaireDemande === true,
       },
-    }),
-  ]);
+    });
+  });
 
   return { success: true };
 }
+
+
+
 
 
 
@@ -333,6 +448,24 @@ private getDayBoundsUTC(base: Date) {
   const dayStartUTC = new Date(`${ymd}T00:00:00.000Z`);
   const dayEndUTC = new Date(`${ymd}T23:59:59.999Z`);
   return { dayStartUTC, dayEndUTC };
+}
+
+private rdvMatchesProcheIdentity(
+  rdv: any,
+  proche: { id: number; nom: string; prenom: string }
+): boolean {
+  // lien direct
+  if (rdv.procheId === proche.id) return true;
+
+  // via identité (RDV créé par médecin / secrétaire)
+  if (rdv.patientIdentity) {
+    return (
+      this.normalize(rdv.patientIdentity.nom) === this.normalize(proche.nom) &&
+      this.normalize(rdv.patientIdentity.prenom) === this.normalize(proche.prenom)
+    );
+  }
+
+  return false;
 }
 
 
@@ -448,21 +581,20 @@ private rdvMatchesPatientIdentity(
   // 1️⃣ lien direct
   if (rdv.patientId === patient.id) return true;
 
-  // 2️⃣ via proche
-  if (rdv.proche && rdv.proche.patientId === patient.id) return true;
+  // ❌ SUPPRIMÉ : un RDV d’un proche ne doit PAS compter comme RDV du patient
+  // if (rdv.proche && rdv.proche.patientId === patient.id) return true;
 
-  // 3️⃣ via identité JSON (COMME LE FRONT)
+  // 2️⃣ via identité JSON (si un RDV a été créé sans patientId mais avec nom/prénom)
   if (rdv.patientIdentity) {
     return (
-      this.normalize(rdv.patientIdentity.nom) ===
-        this.normalize(patient.nom) &&
-      this.normalize(rdv.patientIdentity.prenom) ===
-        this.normalize(patient.prenom)
+      this.normalize(rdv.patientIdentity.nom) === this.normalize(patient.nom) &&
+      this.normalize(rdv.patientIdentity.prenom) === this.normalize(patient.prenom)
     );
   }
 
   return false;
 }
+
 
 
 async patientHasFutureRdvWithMedecin(
@@ -473,39 +605,53 @@ async patientHasFutureRdvWithMedecin(
 
   const patient = await this.prisma.patient.findUnique({
     where: { id: patientId },
-    select: {
-      id: true,
-      nom: true,
-      prenom: true,
-      dateNaissance: true,
-    },
+    select: { id: true, nom: true, prenom: true },
   });
   if (!patient) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
 
   const rdvs = await this.prisma.rendezVous.findMany({
     where: {
       medecinId,
       typeSlot: 'PRIS',
+      date: { gte: today },
     },
-    include: {
-      proche: true,
-    },
+    // ⚠️ pas besoin d’inclure proche: on ne doit pas matcher dessus
   });
 
   for (const rdv of rdvs) {
-    const full = new Date(rdv.date);
-    const [h, m] = rdv.heure.split(':').map(Number);
-    full.setHours(h, m, 0, 0);
+    if (!rdv.date || !rdv.heure) continue;
 
+    const [h, m] = rdv.heure.split(':').map(Number);
+    if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
+
+    const full = new Date(rdv.date);
+    full.setHours(h, m, 0, 0);
     if (full < now) continue;
 
-    if (this.rdvMatchesPatientIdentity(rdv, patient)) {
+    // ✅ 1) lien direct patient uniquement
+    if (rdv.patientId === patient.id) return true;
+
+    // ✅ 2) identité JSON legacy (si un RDV existe sans patientId)
+    const identity = rdv.patientIdentity as { nom?: string; prenom?: string } | null;
+    if (
+      identity?.nom &&
+      identity?.prenom &&
+      this.normalize(identity.nom) === this.normalize(patient.nom) &&
+      this.normalize(identity.prenom) === this.normalize(patient.prenom)
+    ) {
       return true;
     }
+
+    // ❌ jamais de match via rdv.proche / patient owner
   }
 
   return false;
 }
+
+
 
 
 async procheHasFutureRdvWithMedecin(
@@ -514,74 +660,39 @@ async procheHasFutureRdvWithMedecin(
 ): Promise<boolean> {
   const now = new Date();
 
-  // 🔒 sécurité proche
   const proche = await this.prisma.proche.findUnique({
     where: { id: procheId },
-    select: {
-      id: true,
-      nom: true,
-      prenom: true,
-      patientId: true,
-    },
+    select: { id: true, nom: true, prenom: true },
   });
-
   if (!proche) return false;
 
-  // 🔑 date du jour (minuit)
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // 🔥 FILTRAGE DB STRICT (CRITIQUE)
   const rdvs = await this.prisma.rendezVous.findMany({
     where: {
       medecinId,
       typeSlot: 'PRIS',
-      date: { gte: today }, // ⬅️ LE FIX MAJEUR
-    },
-    include: {
-      proche: true,
+      date: { gte: today },
+      procheId: proche.id, // ✅ filtre DB direct
     },
   });
 
   for (const rdv of rdvs) {
-    // 🛡️ garde absolue
     if (!rdv.date || !rdv.heure) continue;
 
     const [h, m] = rdv.heure.split(':').map(Number);
-    if (isNaN(h) || isNaN(m)) continue;
+    if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
 
     const full = new Date(rdv.date);
     full.setHours(h, m, 0, 0);
-
-    if (full < now) continue;
-
-    // 1️⃣ lien direct proche
-    if (rdv.procheId === proche.id) {
-      return true;
-    }
-
-    // 2️⃣ via patient propriétaire
-    if (rdv.proche && rdv.proche.patientId === proche.patientId) {
-      return true;
-    }
-
-    // 3️⃣ via identité JSON (CSV / secrétaire / historique)
-    const identity = rdv.patientIdentity as
-      | { nom?: string; prenom?: string }
-      | null;
-
-    if (
-      identity?.nom &&
-      identity?.prenom &&
-      this.normalize(identity.nom) === this.normalize(proche.nom) &&
-      this.normalize(identity.prenom) === this.normalize(proche.prenom)
-    ) {
-      return true;
-    }
+    if (full >= now) return true;
   }
 
   return false;
 }
+
+
 
 
 private async assertIdentityInCsvForMedecin(
@@ -750,77 +861,103 @@ private assertStrictCsvMatch(
    * Objectif: permettre de passer d'un type à n'importe quel autre,
    * tout en gardant une base cohérente.
    */
-  private buildTransitionPatch(
-    before: any,
-    dto: UpdateRdvDto,
-  ): {
-    dataPatch: any;
-    nextTypeSlot?: 'LIBRE' | 'PRIS' | 'BLOQUE' | 'HORS';
-  } {
-    const nextTypeSlot =
-      dto.typeSlot !== undefined ? this.normalizeTypeSlot(dto.typeSlot) : undefined;
+private buildTransitionPatch(
+  before: any,
+  dto: UpdateRdvDto,
+): {
+  dataPatch: any;
+  nextTypeSlot?: 'LIBRE' | 'PRIS' | 'BLOQUE' | 'HORS';
+} {
+  const nextTypeSlot =
+    dto.typeSlot !== undefined
+      ? this.normalizeTypeSlot(dto.typeSlot)
+      : undefined;
 
-    const nextPatientId =
-      dto.patientId !== undefined
-        ? dto.patientId === null
-          ? null
-          : Number(dto.patientId)
-        : undefined;
+  const nextPatientId =
+    dto.patientId !== undefined
+      ? dto.patientId === null
+        ? null
+        : Number(dto.patientId)
+      : undefined;
 
-    const nextProcheId =
-      dto.procheId !== undefined
-        ? dto.procheId === null
-          ? null
-          : Number(dto.procheId)
-        : undefined;
+  const nextProcheId =
+    dto.procheId !== undefined
+      ? dto.procheId === null
+        ? null
+        : Number(dto.procheId)
+      : undefined;
 
-    // XOR strict (si les 2 sont explicitement non-null côté dto)
-    if (
-      nextPatientId !== undefined &&
-      nextPatientId !== null &&
-      nextProcheId !== undefined &&
-      nextProcheId !== null
-    ) {
+  // XOR strict
+  if (
+    nextPatientId !== undefined &&
+    nextPatientId !== null &&
+    nextProcheId !== undefined &&
+    nextProcheId !== null
+  ) {
+    throw new BadRequestException(
+      'Un RDV ne peut pas être pour un patient ET un proche.',
+    );
+  }
+
+  const dataPatch: any = {
+    motif: dto.motif !== undefined ? dto.motif : undefined,
+    patientId: nextPatientId,
+    procheId: nextProcheId,
+    medecinId:
+      dto.medecinId !== undefined ? Number(dto.medecinId) : undefined,
+    typeSlot: nextTypeSlot,
+    typeConsultation:
+      dto.typeConsultation !== undefined
+        ? this.normalizeConsultationType(dto.typeConsultation)
+        : undefined,
+  };
+
+  /**
+   * 🔥 RÈGLE MÉTIER FONDAMENTALE
+   *
+   * 1) PRIS -> LIBRE | BLOQUE | HORS  => reset TOTAL
+   * 2) PRIS -> PRIS avec changement patient/proche => reset TOTAL
+   */
+  const isLeavingPris =
+    before.typeSlot === 'PRIS' &&
+    nextTypeSlot !== undefined &&
+    nextTypeSlot !== 'PRIS';
+
+  const isReplacingPatientInPris =
+    before.typeSlot === 'PRIS' &&
+    nextTypeSlot === 'PRIS' &&
+    (dto.patientId !== undefined || dto.procheId !== undefined);
+
+  if (isLeavingPris || isReplacingPatientInPris) {
+    dataPatch.patientId = null;
+    dataPatch.procheId = null;
+    dataPatch.motif = null;
+    dataPatch.patientIdentity = null;
+    dataPatch.formulaireDemande = false;
+  }
+
+  // Validation finale : PRIS doit avoir une cible
+  if (nextTypeSlot === 'PRIS') {
+    const afterPatientId =
+      dataPatch.patientId !== undefined
+        ? dataPatch.patientId
+        : before.patientId;
+
+    const afterProcheId =
+      dataPatch.procheId !== undefined
+        ? dataPatch.procheId
+        : before.procheId;
+
+    if (!afterPatientId && !afterProcheId) {
       throw new BadRequestException(
-        'Un RDV ne peut pas être pour un patient ET un proche.',
+        'Pour passer un créneau en PRIS, patientId ou procheId est obligatoire.',
       );
     }
-
-    const dataPatch: any = {
-      motif: dto.motif !== undefined ? dto.motif : undefined,
-      patientId: nextPatientId,
-      procheId: nextProcheId,
-      medecinId: dto.medecinId !== undefined ? Number(dto.medecinId) : undefined,
-      typeSlot: nextTypeSlot,
-      typeConsultation:
-        dto.typeConsultation !== undefined
-          ? this.normalizeConsultationType(dto.typeConsultation)
-          : undefined,
-    };
-
-    // Transition: si on sort de PRIS => on nettoie systématiquement (cohérence DB)
-    if (nextTypeSlot !== undefined && nextTypeSlot !== 'PRIS') {
-      dataPatch.patientId = null;
-      dataPatch.procheId = null;
-      dataPatch.motif = null;
-    }
-
-    // Transition: si on passe en PRIS => patient ou proche obligatoire (ou déjà présent)
-    if (nextTypeSlot !== undefined && nextTypeSlot === 'PRIS') {
-      const afterPatientId =
-        dataPatch.patientId !== undefined ? dataPatch.patientId : before.patientId;
-      const afterProcheId =
-        dataPatch.procheId !== undefined ? dataPatch.procheId : before.procheId;
-
-      if (!afterPatientId && !afterProcheId) {
-        throw new BadRequestException(
-          'Pour passer un créneau en PRIS, patientId ou procheId est obligatoire.',
-        );
-      }
-    }
-
-    return { dataPatch, nextTypeSlot };
   }
+
+  return { dataPatch, nextTypeSlot };
+}
+
 
   /* -------------------------------------------------------------
    * CRUD / Queries
@@ -848,237 +985,379 @@ async update(
 
   const { dataPatch, nextTypeSlot } = this.buildTransitionPatch(rdv, dto);
 
-  // 🔒 Gestion formulaire (médecin / secrétaire UNIQUEMENT)
   if (dto.formulaireDemande !== undefined) {
     dataPatch.formulaireDemande = dto.formulaireDemande;
   }
 
-  const updated = await this.prisma.rendezVous.update({
-    where: { id: rdvId },
-    data: dataPatch,
+  // 🔥 FIX FONDAMENTAL : héritage date / heure AVANT replace
+  const finalDate =
+    dataPatch.date !== undefined ? dataPatch.date : rdv.date;
+  const finalHeure =
+    dataPatch.heure !== undefined ? dataPatch.heure : rdv.heure;
+
+  if (nextTypeSlot === 'PRIS') {
+    if (!finalDate || !finalHeure) {
+      throw new BadRequestException(
+        'Impossible de passer un RDV en PRIS sans date et heure.',
+      );
+    }
+  }
+
+  const override: Partial<CreateRdvDto> = {
+    ...(dataPatch.medecinId != null ? { medecinId: dataPatch.medecinId } : {}),
+    ...(finalDate
+      ? {
+          date: this.toDateOnlyUTC(new Date(finalDate))
+            .toISOString()
+            .slice(0, 10),
+        }
+      : {}),
+    ...(finalHeure ? { heure: finalHeure } : {}),
+    ...(dataPatch.motif !== undefined ? { motif: dataPatch.motif } : {}),
+    ...(dataPatch.patientId !== undefined
+      ? { patientId: dataPatch.patientId }
+      : {}),
+    ...(dataPatch.procheId !== undefined
+      ? { procheId: dataPatch.procheId }
+      : {}),
+    ...(dataPatch.typeSlot !== undefined
+      ? { typeSlot: dataPatch.typeSlot }
+      : {}),
+    ...(dataPatch.typeConsultation !== undefined
+      ? { typeConsultation: dataPatch.typeConsultation }
+      : {}),
+    ...(dataPatch.formulaireDemande !== undefined
+      ? { formulaireDemande: dataPatch.formulaireDemande }
+      : {}),
+  };
+
+  const result = await this.prisma.$transaction(async (tx) => {
+    await this.formulaireService.deleteForRdv(rdvId).catch(() => {});
+    return this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: rdvId,
+      override,
+    });
   });
 
-  // 🔔 Notifications RDV
+  const created = result.created;
+
   if (rdv.typeSlot === 'PRIS' && nextTypeSlot !== 'PRIS') {
     await this.notificationService.notifyRdvAnnulation(rdvId, actor);
   }
 
   if (rdv.typeSlot !== 'PRIS' && nextTypeSlot === 'PRIS') {
-    await this.notificationService.notifyRdvConfirmation(rdvId, actor);
+    await this.notificationService.notifyRdvConfirmation(created.id, actor);
   }
 
   if (rdv.typeSlot === 'PRIS' && nextTypeSlot === 'PRIS') {
-    await this.notificationService.notifyRdvModification(rdvId, actor);
+    await this.notificationService.notifyRdvModification(created.id, actor);
   }
 
-  // 📩 Formulaire — activation après coup (médecin / secrétaire)
-  if (
-    dto.formulaireDemande === true &&
-    rdv.formulaireDemande === false &&
-    updated.typeSlot === 'PRIS'
-  ) {
-    const targetPatientId =
-      updated.patientId ??
-      (updated.procheId
-        ? (
-            await this.prisma.proche.findUnique({
-              where: { id: updated.procheId },
-              select: { patientId: true },
-            })
-          )?.patientId
-        : null);
-
-    if (targetPatientId) {
-      await this.formulaireService.createForRdv(
-        updated.id,
-        targetPatientId,
-        updated.medecinId!,
-      );
-
-      const patient = await this.prisma.patient.findUnique({
-        where: { id: targetPatientId },
-        select: { email: true },
-      });
-
-      if (patient?.email) {
-        await this.formulaireService.sendFormulaireEmail(
-          patient.email,
-          updated.id,
-        );
-      }
-    }
-  }
-
-  return { success: true, rdv: updated };
+  return { success: true, rdv: created };
 }
 
+async getDaySchedule(medecinId: number, dateStr: string) {
+  if (!medecinId || !dateStr) {
+    throw new BadRequestException('Paramètres manquants.');
+  }
 
-async getDaySchedule(medecinId: number, date: string) {
-  const day = new Date(`${date}T00:00:00.000Z`);
-  if (isNaN(day.getTime())) {
+  const dayStart = new Date(dateStr);
+  if (isNaN(dayStart.getTime())) {
     throw new BadRequestException('Date invalide.');
   }
 
-  const dayStart = new Date(`${date}T00:00:00.000Z`);
-  const dayEnd = new Date(`${date}T23:59:59.999Z`);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setHours(23, 59, 59, 999);
 
-  const hours = this.generateDaySlots();
+  // grille complète 07:00 → 23:00
+  const slots = this.generateDaySlots();
 
   const rdvs = await this.prisma.rendezVous.findMany({
     where: {
       medecinId,
-      date: { gte: dayStart, lte: dayEnd },
+      date: {
+        gte: dayStart,
+        lte: dayEnd,
+      },
     },
-    include: { patient: true, proche: true },
+    include: {
+      patient: true,
+      proche: true,
+    },
   });
 
-  const rdvByHour = new Map<string, any>();
+  const byHour = new Map<string, any>();
   for (const rdv of rdvs) {
-    rdvByHour.set(rdv.heure, rdv);
-  }
-
-  const slots: Array<{
-    heure: string;
-    typeSlot: 'LIBRE' | 'PRIS' | 'BLOQUE' | 'HORS';
-    rdvId: number | null;
-    label?: string;
-    source: 'REAL' | 'EMPTY';
-  }> = [];
-
-  for (const heure of hours) {
-    const rdv = rdvByHour.get(heure);
-
-    // ✅ SLOT RÉEL
-    if (rdv) {
-      const typeSlot = this.normalizeTypeSlot(rdv.typeSlot);
-
-      if (typeSlot === 'HORS') {
-        slots.push({
-          heure,
-          typeSlot: 'BLOQUE',
-          rdvId: rdv.id,
-          source: 'REAL',
-        });
-        continue;
-      }
-
-      let label: string | undefined;
-      if (typeSlot === 'PRIS') {
-        if (rdv.patient) {
-          label = `${rdv.patient.prenom} ${rdv.patient.nom}`;
-        } else if (rdv.proche) {
-          label = `${rdv.proche.prenom} ${rdv.proche.nom}`;
-        } else if (rdv.patientIdentity) {
-          const id = rdv.patientIdentity as any;
-          if (id?.prenom && id?.nom) {
-            label = `${id.prenom} ${id.nom}`;
-          }
-        }
-      }
-
-      slots.push({
-        heure,
-        typeSlot,
-        rdvId: rdv.id,
-        label,
-        source: 'REAL',
-      });
-
-      continue;
+    if (rdv.heure) {
+      byHour.set(rdv.heure, rdv);
     }
-
-    // ❌ PLUS JAMAIS DE LIBRE VIRTUEL
-    slots.push({
-      heure,
-      typeSlot: 'HORS',
-      rdvId: null,
-      source: 'EMPTY',
-    });
   }
 
-  return { date, slots };
+  return {
+    slots: slots.map((hour) => {
+      const rdv = byHour.get(hour);
+
+      if (!rdv) {
+        return {
+          heure: hour,
+          typeSlot: 'LIBRE',
+          rdvId: null,
+          source: 'VIRTUEL',
+        };
+      }
+
+      return {
+        heure: hour,
+        typeSlot: this.normalizeTypeSlot(rdv.typeSlot),
+        rdvId: rdv.id,
+        source: 'REAL',
+        patient: rdv.patient
+          ? {
+              id: rdv.patient.id,
+              nom: rdv.patient.nom,
+              prenom: rdv.patient.prenom,
+            }
+          : null,
+        proche: rdv.proche
+          ? {
+              id: rdv.proche.id,
+              nom: rdv.proche.nom,
+              prenom: rdv.proche.prenom,
+            }
+          : null,
+        motif: rdv.motif ?? null,
+        typeConsultation: rdv.typeConsultation ?? null,
+      };
+    }),
+  };
 }
 
 
 
 
 
-  async findAll(medecinId?: number, patientId?: number, procheId?: number) {
-    return this.prisma.rendezVous.findMany({
-      where: {
-        ...(medecinId ? { medecinId } : {}),
-        ...(patientId ? { patientId } : {}),
-        ...(procheId ? { procheId } : {}),
-      },
-      include: {
-        patient: {
-          select: {
-            id: true,
-            nom: true,
-            prenom: true,
-            notePatient: true,
-          },
-        },
-        proche: true,
-        medecin: true,
-      },
-      orderBy: [{ date: 'asc' }, { heure: 'asc' }],
-    });
-  }
-
-
-async canBook(
-  medecinId: number,
+async findAll(
+  medecinId?: number,
   patientId?: number,
   procheId?: number,
 ) {
-  // ⛔ XOR STRICT
+  // ⛔ XOR strict
   if (patientId && procheId) {
     throw new BadRequestException(
       'patientId et procheId ne peuvent pas être définis ensemble.',
     );
   }
 
-  // 🔒 1️⃣ RÈGLE RDV FUTUR — PAR CIBLE (PATIENT)
-  if (patientId !== undefined && patientId !== null) {
-    const hasFuture = await this.patientHasFutureRdvWithMedecin(
-      patientId,
-      medecinId,
-    );
+  // 🔹 Chargement éventuel du proche (OBLIGATOIRE pour legacy)
+  const proche =
+    procheId != null
+      ? await this.prisma.proche.findUnique({
+          where: { id: procheId },
+          select: {
+            id: true,
+            nom: true,
+            prenom: true,
+          },
+        })
+      : null;
 
-    if (hasFuture) {
-      return { canBook: false, reason: 'HAS_FUTURE_RDV' };
+  // 🔹 Requête DB LARGE (ne jamais perdre un RDV)
+  const rdvs = await this.prisma.rendezVous.findMany({
+    where: {
+      ...(medecinId ? { medecinId } : {}),
+      ...(patientId ? { patientId } : {}),
+      // ⚠️ PAS de filtre procheId ici (sinon on casse le legacy)
+    },
+    include: {
+      patient: {
+        select: {
+          id: true,
+          nom: true,
+          prenom: true,
+          notePatient: true,
+        },
+      },
+      proche: true,
+      medecin: true,
+    },
+    orderBy: [{ date: 'asc' }, { heure: 'asc' }],
+  });
+
+  // 🔹 FILTRAGE MÉTIER FINAL (SOURCE DE VÉRITÉ)
+  return rdvs.filter((rdv) => {
+    // 🧑 PATIENT (rien ne change)
+    if (patientId) {
+      return rdv.patientId === patientId;
     }
+
+    // 👪 PROCHE (FIX DÉFINITIF)
+    if (procheId && proche) {
+      return this.rdvMatchesProcheIdentity(rdv, proche);
+    }
+
+    // 🩺 MÉDECIN seul → tout
+    return true;
+  });
+}
+
+
+
+async canBook(
+  medecinId: number,
+  patientId?: number,
+  procheId?: number,
+): Promise<
+  | { canBook: true }
+  | { canBook: false; reason: 'HAS_FUTURE_RDV' | 'CSV_GATE' }
+> {
+  // ───────────────────────────────────────────
+  // 0️⃣ XOR STRICT
+  // ───────────────────────────────────────────
+  if (patientId && procheId) {
+    throw new BadRequestException(
+      'patientId et procheId ne peuvent pas être définis ensemble.',
+    );
   }
 
-  // 🔒 1️⃣ RÈGLE RDV FUTUR — PAR CIBLE (PROCHE)
-  if (procheId !== undefined && procheId !== null) {
-    const hasFuture = await this.procheHasFutureRdvWithMedecin(
-      procheId,
-      medecinId,
-    );
+  // ───────────────────────────────────────────
+  // 1️⃣ Médecin
+  // ───────────────────────────────────────────
+  const medecin = await this.prisma.medecin.findUnique({
+    where: { id: medecinId },
+    select: {
+      id: true,
+      accepteNouveauxPatients: true,
+    },
+  });
 
-    if (hasFuture) {
-      return { canBook: false, reason: 'HAS_FUTURE_RDV' };
-    }
+  if (!medecin) {
+    throw new NotFoundException('Médecin introuvable.');
   }
 
-  // 🔒 2️⃣ CSV GATE — IDENTITÉ DE LA CIBLE
-  try {
+  // ───────────────────────────────────────────
+  // 2️⃣ CSV GATE
+  // ───────────────────────────────────────────
+  if (medecin.accepteNouveauxPatients === false) {
     const identity = await this.getIdentityForBooking(
       patientId ?? null,
       procheId ?? null,
     );
 
     await this.assertPatientAllowedForMedecin(medecinId, identity);
-  } catch {
-    return { canBook: false, reason: 'CSV_BLOCK' };
   }
 
+  // ───────────────────────────────────────────
+  // 3️⃣ RÈGLE MÉTIER — 1 RDV FUTUR MAX
+  // ───────────────────────────────────────────
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const now = new Date();
+
+  // 🔥 IMPORTANT : PAS DE FILTRE patientId / procheId ICI
+  const rdvs = await this.prisma.rendezVous.findMany({
+    where: {
+      medecinId,
+      typeSlot: 'PRIS',
+      date: { gte: today },
+    },
+    select: {
+      id: true,
+      date: true,
+      heure: true,
+      patientId: true,
+      procheId: true,
+      patientIdentity: true,
+    },
+  });
+
+  // ───────────────────────────────────────────
+  // 4️⃣ CAS PATIENT
+  // ───────────────────────────────────────────
+  if (patientId && !procheId) {
+    const patient = await this.prisma.patient.findUnique({
+      where: { id: patientId },
+      select: { id: true, nom: true, prenom: true },
+    });
+    if (!patient) return { canBook: true };
+
+    for (const rdv of rdvs) {
+      if (!rdv.date || !rdv.heure) continue;
+
+      const [h, m] = rdv.heure.split(':').map(Number);
+      if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
+
+      const full = new Date(rdv.date);
+      full.setHours(h, m, 0, 0);
+      if (full < now) continue;
+
+      // lien direct
+      if (rdv.patientId === patient.id) {
+        return { canBook: false, reason: 'HAS_FUTURE_RDV' };
+      }
+
+      // identité legacy
+      if (rdv.patientIdentity) {
+        const id = rdv.patientIdentity as any;
+        if (
+          this.normalize(id.nom) === this.normalize(patient.nom) &&
+          this.normalize(id.prenom) === this.normalize(patient.prenom)
+        ) {
+          return { canBook: false, reason: 'HAS_FUTURE_RDV' };
+        }
+      }
+    }
+
+    return { canBook: true };
+  }
+
+  // ───────────────────────────────────────────
+  // 5️⃣ CAS PROCHE (FIX CRITIQUE)
+  // ───────────────────────────────────────────
+  if (procheId) {
+    const proche = await this.prisma.proche.findUnique({
+      where: { id: procheId },
+      select: { id: true, nom: true, prenom: true, dateNaissance: true },
+    });
+    if (!proche) return { canBook: true };
+
+    for (const rdv of rdvs) {
+      if (!rdv.date || !rdv.heure) continue;
+
+      const [h, m] = rdv.heure.split(':').map(Number);
+      if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
+
+      const full = new Date(rdv.date);
+      full.setHours(h, m, 0, 0);
+      if (full < now) continue;
+
+      // 1️⃣ lien direct procheId
+      if (rdv.procheId === proche.id) {
+        return { canBook: false, reason: 'HAS_FUTURE_RDV' };
+      }
+
+      // 2️⃣ 🔥 identité legacy (RDV créé par médecin / secrétaire)
+      if (rdv.patientIdentity) {
+        const id = rdv.patientIdentity as any;
+        if (
+          this.normalize(id.nom) === this.normalize(proche.nom) &&
+          this.normalize(id.prenom) === this.normalize(proche.prenom)
+        ) {
+          return { canBook: false, reason: 'HAS_FUTURE_RDV' };
+        }
+      }
+    }
+
+    return { canBook: true };
+  }
+
+  // ───────────────────────────────────────────
+  // 6️⃣ Défaut
+  // ───────────────────────────────────────────
   return { canBook: true };
 }
-
-
 
 
 
@@ -1088,6 +1367,7 @@ async canBook(
    * ✅ - médecin: uniquement dans son planning (même medecinId)
    * ✅ - secrétaire: autorise inter-médecins si même cabinet
    ------------------------------------------------------------- */
+
 async swapSlots(
   firstId: number,
   secondId: number,
@@ -1106,12 +1386,10 @@ async swapSlots(
     throw new NotFoundException('RDV introuvable.');
   }
 
-  // règles médecin INCHANGÉES
   if (actor === 'medecin' && first.medecinId !== second.medecinId) {
     throw new BadRequestException('Swap interdit hors planning médecin.');
   }
 
-  // règles secrétaire : même cabinet si 2 médecins
   if (
     actor === 'secretaire' &&
     first.medecinId &&
@@ -1134,47 +1412,31 @@ async swapSlots(
     }
   }
 
-  const posA = { date: first.date, heure: first.heure, medecinId: first.medecinId };
-  const posB = { date: second.date, heure: second.heure, medecinId: second.medecinId };
+  const posA: Partial<CreateRdvDto> = {
+    date: this.toDateOnlyUTC(new Date(first.date)).toISOString().slice(0, 10),
+    heure: first.heure,
+    ...(first.medecinId != null ? { medecinId: first.medecinId } : {}),
+  };
 
-  try {
-    // 🔁 TENTATIVE SWAP NATIF
-    await this.prisma.$transaction(async (tx) => {
-      await tx.rendezVous.update({
-        where: { id: firstId },
-        data: { date: new Date('2099-12-31'), heure: '00:00', medecinId: first.medecinId },
-      });
+  const posB: Partial<CreateRdvDto> = {
+    date: this.toDateOnlyUTC(new Date(second.date)).toISOString().slice(0, 10),
+    heure: second.heure,
+    ...(second.medecinId != null ? { medecinId: second.medecinId } : {}),
+  };
 
-      await tx.rendezVous.update({
-        where: { id: secondId },
-        data: posA,
-      });
-
-      await tx.rendezVous.update({
-        where: { id: firstId },
-        data: posB,
-      });
-    });
-  } catch {
-    // 🔥 FALLBACK GARANTI
-    // B → tmp
-    const tmp = await this.prisma.rendezVous.update({
-      where: { id: secondId },
-      data: { date: new Date('2099-12-30'), heure: '23:45', medecinId: second.medecinId },
+  await this.prisma.$transaction(async (tx) => {
+    await this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: firstId,
+      override: posB,
     });
 
-    // A → B
-    await this.prisma.rendezVous.update({
-      where: { id: firstId },
-      data: posB,
+    await this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: secondId,
+      override: posA,
     });
-
-    // B → A
-    await this.prisma.rendezVous.update({
-      where: { id: secondId },
-      data: posA,
-    });
-  }
+  });
 
   return { success: true };
 }
@@ -1188,23 +1450,50 @@ async getForPatient(patientId: number, type: 'futurs' | 'passes') {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  return this.prisma.rendezVous.findMany({
+  // 1️⃣ Patient + proches (pour legacy uniquement)
+  const patient = await this.prisma.patient.findUnique({
+    where: { id: patientId },
+    select: {
+      id: true,
+      nom: true,
+      prenom: true,
+      proches: {
+        select: {
+          id: true,
+          nom: true,
+          prenom: true,
+        },
+      },
+    },
+  });
+
+  if (!patient) return [];
+
+  const normalize = (v?: string) =>
+    (v ?? '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+
+  // 2️⃣ Requête DB large mais contrôlée
+  const rdvs = await this.prisma.rendezVous.findMany({
     where: {
       typeSlot: 'PRIS',
-
       AND: [
         {
           OR: [
-            // Moi
+            // RDV patient direct
             { patientId },
 
-            // Proche réel
+            // RDV proche réel
             { proche: { patientId } },
 
-            // 🔥 Proche "logique" (CSV / secrétaire / historique)
+            // RDV legacy (CSV / médecin / secrétaire)
             {
               AND: [
                 { patientId: null },
+                { procheId: null },
                 { patientIdentity: { not: Prisma.JsonNull } },
               ],
             },
@@ -1245,7 +1534,49 @@ async getForPatient(patientId: number, type: 'futurs' | 'passes') {
       { heure: type === 'futurs' ? 'asc' : 'desc' },
     ],
   });
+
+  // 3️⃣ FILTRAGE FINAL — LOGIQUE MÉTIER CORRECTE
+  return rdvs.filter((rdv) => {
+    // ✅ RDV patient direct
+    if (rdv.patientId === patient.id) {
+      return true;
+    }
+
+    // ✅ RDV proche RÉEL → PRIORITAIRE (FIX CRITIQUE)
+    if (rdv.procheId && rdv.proche?.patientId === patient.id) {
+      return true;
+    }
+
+    // ⚠️ RDV legacy UNIQUEMENT (pas de patientId, pas de procheId)
+    if (!rdv.patientId && !rdv.procheId && rdv.patientIdentity) {
+      const id = rdv.patientIdentity as any;
+      const idNom = normalize(id.nom);
+      const idPrenom = normalize(id.prenom);
+
+      // legacy patient
+      if (
+        idNom === normalize(patient.nom) &&
+        idPrenom === normalize(patient.prenom)
+      ) {
+        return true;
+      }
+
+      // legacy proche
+      for (const p of patient.proches ?? []) {
+        if (
+          idNom === normalize(p.nom) &&
+          idPrenom === normalize(p.prenom)
+        ) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  });
 }
+
+
 
 
   /* -------------------------------------------------------------
@@ -1286,21 +1617,35 @@ async createSlot(data: {
   // ✅ FIX : PATCH ABSOLU
   // → on écrase TOUT, y compris un ancien HORS
   if (existing) {
-    const { dataPatch } = this.buildTransitionPatch(existing, {
-      typeSlot: targetType,
+  if (existing) {
+    const created = await this.prisma.$transaction(async (tx) => {
+      await this.formulaireService.deleteForRdv(existing.id).catch(() => {});
+      await tx.rendezVous.delete({ where: { id: existing.id } });
+
+      return tx.rendezVous.create({
+        data: {
+          medecinId,
+          date: dateObj,
+          heure: data.heure,
+          typeSlot: targetType,
+          patientId: null,
+          procheId: null,
+          motif: null,
+          patientIdentity: undefined as any,
+          typeConsultation: 'PRESENTIEL',
+          formulaireDemande: false,
+        },
+        include: {
+          patient: true,
+          proche: true,
+          medecin: true,
+        },
+      });
     });
 
-    const updated = await this.prisma.rendezVous.update({
-      where: { id: existing.id },
-      data: dataPatch,
-      include: {
-        patient: true,
-        proche: true,
-        medecin: true,
-      },
-    });
+    return { success: true, rdv: created };
+  }
 
-    return { success: true, rdv: updated };
   }
 
   // 2️⃣ sinon, création normale
@@ -1321,43 +1666,67 @@ async createSlot(data: {
   return { success: true, rdv };
 }
 
-
 async applyScheduleInterval(params: {
   medecinId: number;
   date: string;
   start: string;
   end: string;
+  typeSlot?: 'LIBRE' | 'BLOQUE';
+  deleteOnly?: boolean;
 }) {
-  const { medecinId, date, start, end } = params;
+  const { medecinId, date, start, end, typeSlot, deleteOnly } = params;
 
-const heures = this.splitInterval(start, end);
+  if (!medecinId || !date || !start || !end) {
+    throw new BadRequestException('Paramètres incomplets.');
+  }
 
+  const dateObj = new Date(`${date}T00:00:00.000Z`);
+  if (isNaN(dateObj.getTime())) {
+    throw new BadRequestException('Date invalide.');
+  }
+
+  const heures = this.splitInterval(start, end);
 
   return this.prisma.$transaction(async (tx) => {
-    // 1️⃣ DELETE HARD de TOUT ce qui existe dans l’intervalle
-const dateObj = new Date(`${date}T00:00:00.000Z`);
+    // 1️⃣ DELETE HARD — vérité absolue
+    await tx.rendezVous.deleteMany({
+      where: {
+        medecinId,
+        date: dateObj,
+        heure: { in: heures },
+      },
+    });
 
-await tx.rendezVous.deleteMany({
-  where: {
-    medecinId,
-    date: dateObj,
-    heure: { in: heures },
-  },
-});
-
-
-    // 2️⃣ CREATE des slots LIBRE
-    for (const heure of heures) {
-await tx.rendezVous.create({
-  data: {
-    medecinId,
-    date: dateObj,
-    heure,
-    typeSlot: "LIBRE",
-  },
-});
-
+    // 2️⃣ VIERGE = delete only
+    if (deleteOnly === true) {
+      return { success: true, deleted: heures.length };
     }
+
+    // 3️⃣ Création contrôlée (LIBRE ou BLOQUE)
+    const finalType = this.normalizeTypeSlot(typeSlot ?? 'LIBRE');
+
+    if (finalType !== 'LIBRE' && finalType !== 'BLOQUE') {
+      throw new BadRequestException('typeSlot invalide pour un créneau.');
+    }
+
+    for (const heure of heures) {
+      await tx.rendezVous.create({
+        data: {
+          medecinId,
+          date: dateObj,
+          heure,
+          typeSlot: finalType,
+          patientId: null,
+          procheId: null,
+          patientIdentity: Prisma.JsonNull,
+          motif: null,
+          formulaireDemande: false,
+          typeConsultation: 'PRESENTIEL',
+        },
+      });
+    }
+
+    return { success: true, created: heures.length, typeSlot: finalType };
   });
 }
 
@@ -1389,6 +1758,10 @@ async create(dto: CreateRdvDto) {
     throw new BadRequestException('medecinId invalide.');
   }
 
+  if (!dto.date) {
+    throw new BadRequestException('Date obligatoire.');
+  }
+
   const rawDate = new Date(dto.date);
   if (isNaN(rawDate.getTime())) {
     throw new BadRequestException('Date invalide.');
@@ -1397,8 +1770,7 @@ async create(dto: CreateRdvDto) {
   const date = new Date(rawDate);
   date.setHours(0, 0, 0, 0);
 
-  const heure = dto.heure;
-  if (!heure) {
+  if (!dto.heure) {
     throw new BadRequestException('Heure obligatoire.');
   }
 
@@ -1408,6 +1780,13 @@ async create(dto: CreateRdvDto) {
       : dto.patientId || dto.procheId
       ? 'PRIS'
       : 'LIBRE';
+
+  // 🔒 GARDE-FOU ABSOLU
+  if (typeSlot === 'PRIS' && (!dto.date || !dto.heure)) {
+    throw new BadRequestException(
+      'Un rendez-vous PRIS doit obligatoirement avoir une date et une heure.',
+    );
+  }
 
   let patientId: number | null = null;
   let procheId: number | null = null;
@@ -1450,14 +1829,13 @@ async create(dto: CreateRdvDto) {
     }
   }
 
-  // 🔑 MÉDECIN / SECRÉTAIRE → décision explicite
   const formulaireDemande = dto.formulaireDemande === true;
 
   const rdv = await this.prisma.rendezVous.create({
     data: {
       medecinId,
       date,
-      heure,
+      heure: dto.heure,
       typeSlot,
       typeConsultation: this.normalizeConsultationType(
         dto.typeConsultation ?? 'PRESENTIEL',
@@ -1474,42 +1852,9 @@ async create(dto: CreateRdvDto) {
     },
   });
 
-  // 📩 FORMULAIRE UNIQUEMENT SI DEMANDÉ
-  if (typeSlot === 'PRIS' && formulaireDemande) {
-    const targetPatientId =
-      patientId ??
-      (procheId
-        ? (
-            await this.prisma.proche.findUnique({
-              where: { id: procheId },
-              select: { patientId: true },
-            })
-          )?.patientId
-        : null);
-
-    if (targetPatientId) {
-      await this.formulaireService.createForRdv(
-        rdv.id,
-        targetPatientId,
-        medecinId,
-      );
-
-      const patient = await this.prisma.patient.findUnique({
-        where: { id: targetPatientId },
-        select: { email: true },
-      });
-
-      if (patient?.email) {
-        await this.formulaireService.sendFormulaireEmail(
-          patient.email,
-          rdv.id,
-        );
-      }
-    }
-  }
-
   return rdv;
 }
+
 
 
 // RdvService.ts
@@ -1672,36 +2017,37 @@ async createForPatient(dto: CreateRdvDto) {
     throw new BadRequestException('Créneau non disponible.');
   }
 
+    // --------------------------------------------------
+  // CAS 3 : slot LIBRE → delete + create (immutabilité)
   // --------------------------------------------------
-  // CAS 3 : slot LIBRE → update
-  // --------------------------------------------------
-  const rdv = await this.prisma.rendezVous.update({
-    where: { id: slot.id },
-    data: {
-      patientId,
-      procheId,
-      motif: dto.motif ?? null,
-      typeSlot: 'PRIS',
-      typeConsultation,
-    },
-    include: {
-      patient: true,
-      proche: true,
-      medecin: true,
-    },
+  const rdv = await this.prisma.$transaction(async (tx) => {
+    // slot LIBRE existant supprimé
+    await tx.rendezVous.delete({ where: { id: slot.id } });
+
+    // nouveau RDV PRIS créé (nouvel id)
+    return tx.rendezVous.create({
+      data: {
+        medecinId,
+        date: dateObj,
+        heure: dto.heure,
+        patientId,
+        procheId,
+        motif: dto.motif ?? null,
+        typeSlot: 'PRIS',
+        typeConsultation,
+      },
+      include: {
+        patient: true,
+        proche: true,
+        medecin: true,
+      },
+    });
   });
 
-  await this.notificationService.notifyRdvConfirmation(
-    rdv.id,
-    'patient',
-  );
+  await this.notificationService.notifyRdvConfirmation(rdv.id, 'patient');
 
   if (patientId) {
-    await this.formulaireService.createForRdv(
-      rdv.id,
-      patientId,
-      medecinId,
-    );
+    await this.formulaireService.createForRdv(rdv.id, patientId, medecinId);
 
     const patient = await this.prisma.patient.findUnique({
       where: { id: patientId },
@@ -1709,10 +2055,7 @@ async createForPatient(dto: CreateRdvDto) {
     });
 
     if (patient?.email) {
-      await this.formulaireService.sendFormulaireEmail(
-        patient.email,
-        rdv.id,
-      );
+      await this.formulaireService.sendFormulaireEmail(patient.email, rdv.id);
     }
   }
 
@@ -1726,6 +2069,7 @@ async createForPatient(dto: CreateRdvDto) {
  * - déplacement vers une case vide
  * - création + suppression atomique
  ------------------------------------------------------------- */
+
 async moveRdvForMedecin(params: {
   rdvId: number;
   toDate: string;
@@ -1743,6 +2087,8 @@ async moveRdvForMedecin(params: {
     throw new BadRequestException('Heure cible obligatoire.');
   }
 
+  const dateOnly = this.toDateOnlyUTC(targetDate).toISOString().slice(0, 10);
+
   return this.prisma.$transaction(async (tx) => {
     const source = await tx.rendezVous.findUnique({
       where: { id: rdvId },
@@ -1758,15 +2104,13 @@ async moveRdvForMedecin(params: {
       );
     }
 
-    // 🔒 collision sur le créneau cible
+    // 🔒 collision réelle uniquement
     const collision = await tx.rendezVous.findFirst({
       where: {
         medecinId,
-        date: targetDate,
+        date: this.toDateOnlyUTC(targetDate),
         heure: toHour,
-        NOT: { id: rdvId }, // 🔑 important
       },
-      select: { id: true },
     });
 
     if (collision) {
@@ -1775,61 +2119,93 @@ async moveRdvForMedecin(params: {
       );
     }
 
-    // ✅ UPDATE IN-PLACE (aucun DELETE)
-    const updated = await tx.rendezVous.update({
-      where: { id: rdvId },
-      data: {
-        date: targetDate,
+    const { created } = await this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: rdvId,
+      override: {
+        date: dateOnly,
         heure: toHour,
       },
     });
 
-    // notification si RDV PRIS
     if (source.typeSlot === 'PRIS') {
       await this.notificationService.notifyRdvModification(
-        updated.id,
+        created.id,
         'medecin',
       );
     }
 
-    return { success: true, rdv: updated };
+    return { success: true, rdv: created };
   });
 }
+
+
 
 
   /* -------------------------------------------------------------
    * REMOVE (soft)
    ------------------------------------------------------------- */
   async remove(
-    id: number,
-    actor: 'patient' | 'medecin' | 'secretaire' | 'system' = 'medecin',
-  ) {
-    const rdv = await this.prisma.rendezVous.findUnique({
-      where: { id },
-      include: { patient: true, proche: true, medecin: true },
-    });
+  id: number,
+  actor: 'patient' | 'medecin' | 'secretaire' | 'system' = 'medecin',
+) {
+  const rdv = await this.prisma.rendezVous.findUnique({
+    where: { id },
+  });
 
-    if (!rdv) throw new NotFoundException('RDV introuvable.');
-
-    if (rdv.typeSlot === 'PRIS' && (rdv.patientId || rdv.procheId)) {
-      await this.notificationService.notifyRdvAnnulation(rdv.id, actor);
-    }
-
-    await this.formulaireService.deleteForRdv(id).catch(() => {});
-
-    const updated = await this.prisma.rendezVous.update({
-      where: { id },
-      data: {
-        patientId: null,
-        procheId: null,
-        motif: null,
-        typeSlot: 'LIBRE',
-      },
-      include: { patient: true, proche: true, medecin: true },
-    });
-
-    return { success: true, rdv: updated };
+  if (!rdv) {
+    throw new NotFoundException('RDV introuvable.');
   }
+
+  if (rdv.typeSlot === 'PRIS') {
+    await this.notificationService.notifyRdvAnnulation(id, actor);
+  }
+
+  const targetType: 'LIBRE' = 'LIBRE';
+
+  const created = await this.prisma.$transaction(async (tx) => {
+    await this.deleteRdvCascade(tx, id);
+
+return tx.rendezVous.create({
+  data: {
+    medecinId: rdv.medecinId!,
+    date: rdv.date,
+    heure: rdv.heure,
+    typeSlot: 'LIBRE',
+    patientId: null,
+    procheId: null,
+    patientIdentity: Prisma.JsonNull, // ✅ FIX
+    motif: null,
+    formulaireDemande: false,
+    typeConsultation: rdv.typeConsultation,
+  },
+});
+
+  });
+
+  return { success: true, rdv: created };
+}
+
+
+
+async deleteHard(rdvId: number) {
+  const rdv = await this.prisma.rendezVous.findUnique({
+    where: { id: rdvId },
+  });
+
+  if (!rdv) {
+    throw new NotFoundException('RDV introuvable.');
+  }
+
+  await this.prisma.$transaction(async (tx) => {
+    // ✅ DELETE CASCADE (FIX)
+    await this.deleteRdvCascade(tx, rdvId);
+  });
+
+  return { success: true };
+}
+
+
 
   /* -------------------------------------------------------------
    * Disponibilités patient : slots LIBRES (future only)
@@ -1845,15 +2221,15 @@ async getDisponibilites(
     throw new BadRequestException('Date invalide.');
   }
 
-  // ⛔ XOR STRICT
+  // ⛔ XOR
   if (patientId && procheId) {
     throw new BadRequestException(
       'patientId et procheId ne peuvent pas être définis ensemble.',
     );
   }
 
-  // 🔒 1️⃣ RÈGLE RDV FUTUR — STOP TOTAL (PATIENT)
-  if (patientId !== undefined && patientId !== null) {
+  // 🔒 règle RDV futur
+  if (patientId) {
     const hasFuture = await this.patientHasFutureRdvWithMedecin(
       patientId,
       medecinId,
@@ -1861,8 +2237,7 @@ async getDisponibilites(
     if (hasFuture) return [];
   }
 
-  // 🔒 1️⃣ RÈGLE RDV FUTUR — STOP TOTAL (PROCHE)
-  if (procheId !== undefined && procheId !== null) {
+  if (procheId) {
     const hasFuture = await this.procheHasFutureRdvWithMedecin(
       procheId,
       medecinId,
@@ -1870,22 +2245,21 @@ async getDisponibilites(
     if (hasFuture) return [];
   }
 
-  // 🔒 2️⃣ CSV GATE
-  if (
-    (patientId !== undefined && patientId !== null) ||
-    (procheId !== undefined && procheId !== null)
-  ) {
+  // 🔒 CSV gate
+  if (patientId || procheId) {
     const identity = await this.getIdentityForBooking(
       patientId ?? null,
       procheId ?? null,
     );
-
     await this.assertPatientAllowedForMedecin(medecinId, identity);
   }
 
-  // --- reste STRICTEMENT inchangé
-  const dayStart = new Date(dateStr + 'T00:00:00.000Z');
-  const dayEnd = new Date(dateStr + 'T23:59:59.999Z');
+  // ✅ FIX FUSEAU — DATE LOCALE
+  const dayStart = new Date(dateStr);
+  dayStart.setHours(0, 0, 0, 0);
+
+  const dayEnd = new Date(dateStr);
+  dayEnd.setHours(23, 59, 59, 999);
 
   const rdvs = await this.prisma.rendezVous.findMany({
     where: {
@@ -2192,9 +2566,6 @@ async getPlanningForCabinetDay(cabinetId: number, dateStr: string) {
  * - Transactionnel (atomique)
  ------------------------------------------------------------- */
 async uploadReplaceForMedecin(dto: CreateRdvDto) {
-  // ───────────────────────────────────────────
-  // 1️⃣ VALIDATIONS DE BASE
-  // ───────────────────────────────────────────
   if (!dto.date || !dto.heure) {
     throw new BadRequestException('date et heure obligatoires.');
   }
@@ -2204,10 +2575,7 @@ async uploadReplaceForMedecin(dto: CreateRdvDto) {
     throw new BadRequestException('Date invalide.');
   }
 
-  // date-only UTC (aligné avec tout le service)
-  const date = new Date(rawDate);
-  date.setHours(0, 0, 0, 0);
-
+  const date = this.toDateOnlyUTC(rawDate);
   const heure = dto.heure;
 
   const medecinId = Number(dto.medecinId);
@@ -2215,159 +2583,131 @@ async uploadReplaceForMedecin(dto: CreateRdvDto) {
     throw new BadRequestException('medecinId invalide.');
   }
 
-  if (dto.patientId && dto.procheId) {
-    throw new BadRequestException(
-      'Un RDV ne peut pas être pour un patient ET un proche.',
-    );
-  }
+  const requestedTypeSlot = dto.typeSlot
+    ? this.normalizeTypeSlot(dto.typeSlot)
+    : 'PRIS';
 
-  const patientId =
-    dto.patientId !== undefined && dto.patientId !== null
-      ? Number(dto.patientId)
-      : null;
-
-  let procheId =
-    dto.procheId !== undefined && dto.procheId !== null
-      ? Number(dto.procheId)
-      : null;
-
-  await this.assertPatientExists(patientId);
-
-  // ───────────────────────────────────────────
-  // 2️⃣ IDENTITÉ / CSV
-  // ───────────────────────────────────────────
-  let patientIdentity: Prisma.InputJsonValue | undefined;
-
-  if (dto.patientIdentity) {
-    patientIdentity = {
-      source: dto.patientIdentity.source,
-      nom: dto.patientIdentity.nom,
-      prenom: dto.patientIdentity.prenom,
-      dateNaissance: dto.patientIdentity.dateNaissance ?? null,
-    } as Prisma.InputJsonValue;
-
-    // CSV strict si demandé par le front
-    if (dto.patientIdentity.source === 'CSV') {
-      const { nom, prenom, dateNaissance } = dto.patientIdentity;
-
-      if (!nom || !prenom || !dateNaissance) {
-        throw new BadRequestException(
-          'Nom, prénom et date de naissance requis pour un patient CSV.',
-        );
-      }
-
-      await this.assertIdentityInCsvForMedecin(medecinId, {
-        nom,
-        prenom,
-        dateNaissance,
-      });
-    }
-  }
-
-  // rattachement automatique proche depuis identité (si possible)
-  if (!patientId && !procheId && patientIdentity && dto.patientId) {
-    const resolvedProcheId = await this.resolveProcheFromIdentity(
-      Number(dto.patientId),
-      patientIdentity as any,
-    );
-
-    if (resolvedProcheId) {
-      procheId = resolvedProcheId;
-    }
-  }
-
-  const typeSlot = this.normalizeTypeSlot(dto.typeSlot ?? 'PRIS');
-  const typeConsultation = this.normalizeConsultationType(
-    dto.typeConsultation,
-  );
-
-  if (typeSlot === 'PRIS' && !patientId && !procheId && !patientIdentity) {
-    throw new BadRequestException(
-      'Un RDV PRIS doit avoir patientId, procheId ou une identité.',
-    );
-  }
-
-  // ───────────────────────────────────────────
-  // 3️⃣ TRANSACTION : DELETE + CREATE
-  // ───────────────────────────────────────────
   return this.prisma.$transaction(async (tx) => {
+    // 🔥 DELETE HARD de tout ce qui existe sur ce créneau
     const existing = await tx.rendezVous.findFirst({
       where: { medecinId, date, heure },
-      select: { id: true, typeSlot: true, patientId: true, procheId: true },
     });
 
-    // 🔥 SUPPRESSION TOTALE DE L’EXISTANT
     if (existing) {
       await this.formulaireService.deleteForRdv(existing.id).catch(() => {});
+      await tx.rendezVous.delete({ where: { id: existing.id } });
+    }
 
-      if (
-        existing.typeSlot === 'PRIS' &&
-        (existing.patientId || existing.procheId)
-      ) {
-        await this.notificationService.notifyRdvModification(
-          existing.id,
-          'medecin',
+    // =====================================================
+    // ✅ CAS 1 — SLOT LIBRE
+    // =====================================================
+    if (requestedTypeSlot === 'LIBRE') {
+      const created = await tx.rendezVous.create({
+        data: {
+          medecinId,
+          date,
+          heure,
+          typeSlot: 'LIBRE',
+          patientId: null,
+          procheId: null,
+          patientIdentity: undefined,
+          motif: null,
+          formulaireDemande: false,
+          // ⛔ PAS de typeConsultation ici
+        },
+        include: {
+          patient: true,
+          proche: true,
+          medecin: true,
+        },
+      });
+
+      return { success: true, rdv: created };
+    }
+
+    // =====================================================
+    // ✅ CAS 2 — SLOT BLOQUÉ
+    // =====================================================
+    if (requestedTypeSlot === 'BLOQUE') {
+      const created = await tx.rendezVous.create({
+        data: {
+          medecinId,
+          date,
+          heure,
+          typeSlot: 'BLOQUE',
+          patientId: null,
+          procheId: null,
+          patientIdentity: undefined,
+          motif: null,
+          formulaireDemande: false,
+          // ⛔ PAS de typeConsultation ici
+        },
+        include: {
+          patient: true,
+          proche: true,
+          medecin: true,
+        },
+      });
+
+      return { success: true, rdv: created };
+    }
+
+    // =====================================================
+    // 🔴 CAS 3 — RDV PRIS
+    // =====================================================
+    if (requestedTypeSlot === 'PRIS') {
+      const patientId =
+        dto.patientId !== undefined && dto.patientId !== null
+          ? Number(dto.patientId)
+          : null;
+
+      const procheId =
+        dto.procheId !== undefined && dto.procheId !== null
+          ? Number(dto.procheId)
+          : null;
+
+      if (!patientId && !procheId && !dto.patientIdentity) {
+        throw new BadRequestException(
+          'Un RDV PRIS nécessite un patient ou une identité.',
         );
       }
 
-      await tx.rendezVous.delete({
-        where: { id: existing.id },
-      });
-    }
-
-    // ✅ CRÉATION UNIQUE (SOURCE DE VÉRITÉ)
-    const created = await tx.rendezVous.create({
-      data: {
-        medecinId,
-        date,
-        heure,
-        motif: dto.motif ?? null,
-        typeSlot,
-        typeConsultation,
-        patientId,
-        procheId,
-        patientIdentity,
-      },
-      include: {
-        patient: true,
-        proche: true,
-        medecin: true,
-      },
-    });
-
-    // ───────────────────────────────────────────
-    // 4️⃣ POST-CREATE (notifications / formulaire)
-    // ───────────────────────────────────────────
-    if (typeSlot === 'PRIS') {
-      await this.notificationService.notifyRdvConfirmation(
-        created.id,
-        'medecin',
+      const typeConsultation = this.normalizeConsultationType(
+        dto.typeConsultation ?? 'PRESENTIEL',
       );
 
-      if (patientId) {
-        await this.formulaireService.createForRdv(
-          created.id,
-          patientId,
+      const created = await tx.rendezVous.create({
+        data: {
           medecinId,
-        );
+          date,
+          heure,
+          typeSlot: 'PRIS',
+          typeConsultation,
+          patientId,
+          procheId,
+          patientIdentity: dto.patientIdentity
+            ? (dto.patientIdentity as any)
+            : undefined,
+          motif: dto.motif ?? null,
+          formulaireDemande: dto.formulaireDemande === true,
+        },
+        include: {
+          patient: true,
+          proche: true,
+          medecin: true,
+        },
+      });
 
-        const patient = await tx.patient.findUnique({
-          where: { id: patientId },
-          select: { email: true },
-        });
-
-        if (patient?.email) {
-          await this.formulaireService.sendFormulaireEmail(
-            patient.email,
-            created.id,
-          );
-        }
-      }
+      return { success: true, rdv: created };
     }
 
-    return { success: true, rdv: created };
+    // =====================================================
+    // ⛔ GARDE ABSOLUE
+    // =====================================================
+    throw new BadRequestException('typeSlot non supporté.');
   });
 }
+
 
 
 // RDV.SERVICE.TS
@@ -2384,37 +2724,50 @@ async moveRdvForSecretaire(params: {
   if (isNaN(targetDate.getTime())) {
     throw new BadRequestException('Date cible invalide.');
   }
+
   if (!toHour) {
     throw new BadRequestException('Heure cible obligatoire.');
   }
 
   const destMedecinId = Number(toMedecinId);
-  if (!destMedecinId || isNaN(destMedecinId)) {
-    throw new BadRequestException('Médecin cible invalide.');
+  if (isNaN(destMedecinId)) {
+    throw new BadRequestException('toMedecinId invalide.');
   }
+
+  const dateOnly = this.toDateOnlyUTC(targetDate)
+    .toISOString()
+    .slice(0, 10);
 
   return this.prisma.$transaction(async (tx) => {
     const source = await tx.rendezVous.findUnique({
       where: { id: rdvId },
-      select: { id: true, medecinId: true, date: true, heure: true, typeSlot: true, patientId: true, procheId: true },
+      include: { patient: true, proche: true, medecin: true },
     });
 
     if (!source) {
       throw new NotFoundException('RDV introuvable.');
     }
 
-    // --- sécurité secrétaire : inter-médecins seulement si même cabinet
-    if (!source.medecinId) {
-      throw new BadRequestException('Impossible de déplacer un RDV sans médecin associé.');
+    if (source.medecinId == null) {
+      throw new BadRequestException('medecinId source manquant.');
     }
 
+    // 🔒 secrétaire : inter-médecins autorisé uniquement si même cabinet
     if (source.medecinId !== destMedecinId) {
       const [m1, m2] = await Promise.all([
-        tx.medecin.findUnique({ where: { id: source.medecinId }, select: { id: true, cabinetId: true } }),
-        tx.medecin.findUnique({ where: { id: destMedecinId }, select: { id: true, cabinetId: true } }),
+        tx.medecin.findUnique({
+          where: { id: source.medecinId },
+          select: { cabinetId: true },
+        }),
+        tx.medecin.findUnique({
+          where: { id: destMedecinId },
+          select: { cabinetId: true },
+        }),
       ]);
 
-      if (!m1 || !m2) throw new NotFoundException('Médecin introuvable.');
+      if (!m1 || !m2) {
+        throw new NotFoundException('Médecin introuvable.');
+      }
 
       if (!m1.cabinetId || !m2.cabinetId || m1.cabinetId !== m2.cabinetId) {
         throw new BadRequestException(
@@ -2423,38 +2776,66 @@ async moveRdvForSecretaire(params: {
       }
     }
 
-    // --- collision sur le créneau cible (chez le médecin cible)
+    // 🚫 collision sur le créneau cible
     const collision = await tx.rendezVous.findFirst({
       where: {
         medecinId: destMedecinId,
-        date: targetDate,
+        date: this.toDateOnlyUTC(targetDate),
         heure: toHour,
-        NOT: { id: rdvId },
       },
       select: { id: true },
     });
 
     if (collision) {
-      throw new BadRequestException('Un autre rendez-vous existe déjà sur ce créneau.');
+      throw new BadRequestException(
+        'Un autre rendez-vous existe déjà sur ce créneau.',
+      );
     }
 
-    // --- update in-place (aucun delete)
-    const updated = await tx.rendezVous.update({
-      where: { id: rdvId },
-      data: {
-        medecinId: destMedecinId,
-        date: targetDate,
+    // ✅ IMMUTABILITÉ : DELETE + CREATE
+    const { created } = await this.replaceRdvByDeleteCreate({
+      tx,
+      sourceId: rdvId,
+      override: {
+        date: dateOnly,
         heure: toHour,
+        medecinId: destMedecinId,
       },
-      include: { patient: true, proche: true, medecin: true },
     });
 
-    // notif si RDV PRIS
+    // 🔔 notif si RDV PRIS
     if (source.typeSlot === 'PRIS') {
-      await this.notificationService.notifyRdvModification(updated.id, 'secretaire');
+      await this.notificationService.notifyRdvModification(
+        created.id,
+        'secretaire',
+      );
     }
 
-    return { success: true, rdv: updated };
+    return { success: true, rdv: created };
   });
 }
+
+
+async getMedecinPlanningMeta(medecinId: number) {
+  const medecin = await this.prisma.medecin.findUnique({
+    where: { id: medecinId },
+    select: {
+      id: true,
+      horaires: true,
+    },
+  });
+
+  if (!medecin) {
+    throw new BadRequestException('Médecin introuvable.');
+  }
+
+  return {
+    medecinId: medecin.id,
+    horaires:
+      typeof medecin.horaires === 'string'
+        ? JSON.parse(medecin.horaires)
+        : medecin.horaires,
+  };
+}
+
 }

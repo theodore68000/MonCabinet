@@ -13,6 +13,8 @@ type Props = {
   selectedDay?: string;
 };
 
+type SlotMode = "VIERGE" | "LIBRE" | "BLOQUE";
+
 type DaySlot = {
   heure: string;
   typeSlot: "LIBRE" | "PRIS" | "BLOQUE";
@@ -26,7 +28,7 @@ type DisplaySlot = {
   end: string;
   typeSlot: "LIBRE" | "PRIS" | "BLOQUE";
   rdvIds: number[];
-  source: "REAL" | "VIRTUEL"; // ✅ AJOUT : permet d’éviter les “fantômes” (REAL gagne)
+  source: "REAL" | "VIRTUEL";
 };
 
 const ORDER = [
@@ -41,10 +43,7 @@ const ORDER = [
 
 /**
  * ✅ FIX SEMAINE (DIMANCHE)
- * On bascule DAY_INDEX en logique ISO (lundi=1 ... dimanche=7)
- * car Date.getDay() retourne 0 pour dimanche.
- *
- * IMPORTANT : même nom (DAY_INDEX), rien supprimé, mais valeurs corrigées.
+ * ISO : lundi=1 ... dimanche=7
  */
 const DAY_INDEX: Record<string, number> = {
   lundi: 1,
@@ -61,6 +60,24 @@ const timeToMinutes = (t: string) => {
   return h * 60 + m;
 };
 
+const minutesToTime = (mins: number) => {
+  const h = String(Math.floor(mins / 60)).padStart(2, "0");
+  const m = String(mins % 60).padStart(2, "0");
+  return `${h}:${m}`;
+};
+
+const addMinutesToTime = (t: string, delta: number) => {
+  const mins = timeToMinutes(t);
+  return minutesToTime(mins + delta);
+};
+
+/**
+ * groupDaySlots produit end = dernière cellule (ex: 10:45).
+ * Pour appliquer un intervalle [start, end) à la quarter, il faut end+15.
+ */
+const endExclusiveFromGroupedEnd = (groupedEnd: string) =>
+  addMinutesToTime(groupedEnd, 15);
+
 const inRange0700to2300 = (heure: string) => {
   const min = timeToMinutes(heure);
   return min >= 7 * 60 && min <= 23 * 60;
@@ -69,7 +86,6 @@ const inRange0700to2300 = (heure: string) => {
 /**
  * ✅ FIX : propagation du "source"
  * - si un intervalle (LIBRE/BLOQUE) contient au moins un slot REAL, l’intervalle devient REAL
- * - évite les rendus "Libre" visuellement incohérents lorsque VIRTUEL et REAL se mélangent
  */
 const groupDaySlots = (slots: DaySlot[]): DisplaySlot[] => {
   const filtered = (slots || [])
@@ -90,7 +106,7 @@ const groupDaySlots = (slots: DaySlot[]): DisplaySlot[] => {
         end: s.heure,
         typeSlot: "PRIS",
         rdvIds: s.rdvId ? [s.rdvId] : [],
-        source: "REAL", // ✅ PRIS = réel (et évite les styles fantômes)
+        source: "REAL",
       });
       continue;
     }
@@ -102,11 +118,7 @@ const groupDaySlots = (slots: DaySlot[]): DisplaySlot[] => {
     ) {
       current.end = s.heure;
       if (s.rdvId) current.rdvIds.push(s.rdvId);
-
-      // ✅ FIX : si l’un des slots groupés est REAL, l’intervalle devient REAL
-      if (s.source === "REAL") {
-        current.source = "REAL";
-      }
+      if (s.source === "REAL") current.source = "REAL";
     } else {
       if (current) res.push(current);
       current = {
@@ -114,7 +126,7 @@ const groupDaySlots = (slots: DaySlot[]): DisplaySlot[] => {
         end: s.heure,
         typeSlot: s.typeSlot,
         rdvIds: s.rdvId ? [s.rdvId] : [],
-        source: s.source, // ✅ AJOUT : base sur la première cellule du groupe
+        source: s.source,
       };
     }
   }
@@ -141,6 +153,9 @@ export default function ScheduleDrawer({
 
   const [newStart, setNewStart] = useState<Record<string, string>>({});
   const [newEnd, setNewEnd] = useState<Record<string, string>>({});
+
+  // ✅ mode de création (LIBRE par défaut)
+  const [slotMode, setSlotMode] = useState<SlotMode>("LIBRE");
 
   const startRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const endRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -180,18 +195,12 @@ export default function ScheduleDrawer({
 
   /**
    * ✅ FIX DIMANCHE (ISO WEEK)
-   * - JS: getDay() -> 0 (dimanche) ... 6 (samedi)
-   * - ISO: 1 (lundi) ... 7 (dimanche)
-   *
-   * On convertit d.getDay() en "isoDay" puis on calcule diff.
-   * => dimanches inclus correctement en vue semaine (loadWeek + save + rendu)
    */
   const getDateForDay = (base: Date, day: string) => {
     const d = new Date(base);
     const targetIso = DAY_INDEX[day]; // 1..7
     const jsDay = d.getDay(); // 0..6
     const isoDay = jsDay === 0 ? 7 : jsDay; // 1..7
-
     const diff = targetIso - isoDay;
 
     d.setDate(d.getDate() + diff);
@@ -199,7 +208,7 @@ export default function ScheduleDrawer({
     return d;
   };
 
-  // ✅ IMPORTANT : on garde splitInterval dans le scope du composant (inchangé)
+  // (laissé inchangé, utilisé ailleurs potentiellement)
   const splitInterval = (start: string, end: string) => {
     const res: string[] = [];
     const [sh, sm] = start.split(":").map(Number);
@@ -217,7 +226,52 @@ export default function ScheduleDrawer({
     return res;
   };
 
-  /* ---------------- LOADERS (micro-ajout pour éviter stale state) ---------------- */
+  /**
+   * ✅ MODIF 1 (FRONT) — Interprétation intelligente des VIRTUEL
+   * - VIRTUEL + dans horaires => LIBRE (affiché)
+   * - VIRTUEL + hors horaires => pas de créneau (filtré)
+   */
+  const isInDefinedHoraires = useCallback(
+    (day: string, heure: string) => {
+      const intervals: string[] = localHoraires?.[day] || [];
+      if (!intervals.length) return false;
+
+      const t = timeToMinutes(heure);
+
+      for (const interval of intervals) {
+        if (!interval || typeof interval !== "string") continue;
+        const [start, end] = interval.split("-");
+        if (!start || !end) continue;
+
+        const s = timeToMinutes(start);
+        const e = timeToMinutes(end);
+
+        if (t >= s && t < e) return true;
+      }
+      return false;
+    },
+    [localHoraires]
+  );
+
+  const normalizeSlotsForDisplay = useCallback(
+    (day: string, slots: DaySlot[]) => {
+      return (slots || [])
+        .filter((s) => s?.heure && inRange0700to2300(s.heure))
+        .filter((s) => {
+          if (s.source !== "VIRTUEL") return true;
+          return isInDefinedHoraires(day, s.heure);
+        })
+        .map((s) => {
+          if (s.source === "VIRTUEL") {
+            return { ...s, typeSlot: "LIBRE" as const };
+          }
+          return s;
+        });
+    },
+    [isInDefinedHoraires]
+  );
+
+  /* ---------------- LOADERS ---------------- */
   const loadDay = useCallback(async () => {
     if (
       !open ||
@@ -260,7 +314,6 @@ export default function ScheduleDrawer({
       const baseDate = getBaseDate();
       const map: Record<string, DaySlot[]> = {};
 
-      // mêmes dates que save() en semaine
       for (const day of ORDER) {
         const dateIso = toISODateOnly(getDateForDay(baseDate, day));
 
@@ -283,43 +336,15 @@ export default function ScheduleDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, medecinId, selectedDay]);
 
-  /* ---------------- LOAD DAY SLOTS (inchangé, mais appelle loadDay) ---------------- */
   useEffect(() => {
     if (mode !== "day") return;
     loadDay();
   }, [mode, loadDay]);
 
-  /* ---------------- LOAD WEEK SLOTS (inchangé, mais appelle loadWeek) ---------------- */
   useEffect(() => {
     if (mode !== "week") return;
     loadWeek();
   }, [mode, loadWeek]);
-
-  /* ---------------- DAY SLOT ACTION ---------------- */
-  const setSlotsHors = async (rdvIds: number[]) => {
-    const ids = (rdvIds || []).filter((x): x is number => typeof x === "number");
-    if (!ids.length) return;
-
-    setSaving(true);
-    try {
-      for (const id of ids) {
-        await fetch(`http://localhost:3001/rdv/${id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ typeSlot: "HORS" }),
-        });
-      }
-
-      // ✅ micro-fix : éviter l’état stale (surtout en semaine)
-      if (mode === "week") await loadWeek();
-      if (mode === "day") await loadDay();
-
-      onClose(true);
-    } catch (e) {
-      console.error(e);
-      setSaving(false);
-    }
-  };
 
   /* ---------------- ACTIONS UI EXISTANTES ---------------- */
   const addSlot = (day: string) => {
@@ -356,41 +381,122 @@ export default function ScheduleDrawer({
   };
 
   /**
-   * ✅ NOUVEAU (sans supprimer l’existant)
-   * Mettre en congé "réel" = passer les slots existants (REAL) en HORS,
-   * tout en gardant le comportement UI existant (vider localHoraires).
+   * ✅ CORE — VIERGE (HARD DELETE) via schedule/apply
+   * IMPORTANT: le backend attend start/end (sinon no-op).
    */
-  const handleDayOff = async (day: string, slotsForThisCard: DaySlot[]) => {
-    // 1) UI existante (horaires locaux)
-    setDayOff(day);
+  const applyDeleteOnlyInterval = async (params: {
+    date: string;
+    start: string;
+    end: string;
+  }) => {
+    const { date, start, end } = params;
+    if (!medecinId) return;
 
-    // 2) Congé réel : on met en HORS tous les RDV présents sur la journée
-    const grouped = groupDaySlots(slotsForThisCard);
-    const allRdvIds = grouped.flatMap((s) => s.rdvIds || []);
-    await setSlotsHors(allRdvIds);
+    await fetch("http://localhost:3001/rdv/schedule/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        medecinId,
+        date,
+        start,
+        end,
+        deleteOnly: true,
+      }),
+    });
   };
 
   /**
-   * ✅ NOUVEAU (sans supprimer l’existant)
-   * Mettre toute la semaine en congé : idem, mais sur tous les jours chargés en weekSlots.
+   * ✅ FIX CONGÉ: journée entière = VIERGE sur 07:00-23:00
    */
-  const handleWeekOff = async () => {
-    // 1) UI existante
-    setWeekOff();
-
-    // 2) Congé réel : prendre tous les rdvIds de toute la semaine (issus des GET /day)
-    const allIds: number[] = [];
-    for (const dateIso of Object.keys(weekSlots || {})) {
-      const grouped = groupDaySlots(weekSlots[dateIso] || []);
-      for (const s of grouped) {
-        if (s?.rdvIds?.length) allIds.push(...s.rdvIds);
-      }
-    }
-
-    await setSlotsHors(allIds);
+  const applyDayDeleteOnly = async (dateIso: string) => {
+    await applyDeleteOnlyInterval({
+      date: dateIso,
+      start: "07:00",
+      end: "23:00",
+    });
   };
 
-  /* ---------------- SAVE (même logique, micro-fix refresh) ---------------- */
+  /**
+   * ✅ FIX POUBELLE: intervalle groupé = VIERGE (deleteOnly)
+   * - end doit être exclusif => end+15
+   */
+  const handleTrashInterval = async (params: {
+    dateIso: string;
+    start: string;
+    endGrouped: string;
+  }) => {
+    const { dateIso, start, endGrouped } = params;
+
+    setSaving(true);
+    try {
+      await applyDeleteOnlyInterval({
+        date: dateIso,
+        start,
+        end: endExclusiveFromGroupedEnd(endGrouped),
+      });
+
+      if (mode === "week") await loadWeek();
+      if (mode === "day") await loadDay();
+
+      onClose(true);
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+    }
+  };
+
+  /**
+   * ✅ FIX "Mettre en congé": VIERGE réel (deleteOnly journée)
+   */
+  const handleDayOff = async (day: string) => {
+    // 1) UI existante (vider horaires locaux)
+    setDayOff(day);
+
+    // 2) Congé réel (VIERGE): hard delete journée
+    setSaving(true);
+    try {
+      const baseDate = getBaseDate();
+      const dateIso =
+        mode === "week"
+          ? toISODateOnly(getDateForDay(baseDate, day))
+          : selectedDay || toISODateOnly(baseDate);
+
+      await applyDayDeleteOnly(dateIso);
+
+      if (mode === "week") await loadWeek();
+      if (mode === "day") await loadDay();
+
+      onClose(true);
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+    }
+  };
+
+  /**
+   * ✅ FIX "Mettre toute la semaine en congé": VIERGE réel (deleteOnly jour par jour)
+   */
+  const handleWeekOff = async () => {
+    setWeekOff();
+
+    setSaving(true);
+    try {
+      const baseDate = getBaseDate();
+
+      for (const day of ORDER) {
+        const dateIso = toISODateOnly(getDateForDay(baseDate, day));
+        await applyDayDeleteOnly(dateIso);
+      }
+
+      await loadWeek();
+      onClose(true);
+    } catch (e) {
+      console.error(e);
+      setSaving(false);
+    }
+  };
+
+  /* ---------------- SAVE (inchangé sauf logique existante) ---------------- */
   const save = async () => {
     if (!medecinId || !selectedDay) return;
 
@@ -399,13 +505,9 @@ export default function ScheduleDrawer({
       const baseDate = getBaseDate();
 
       /**
-       * ✅ MINI-CHANGEMENT CRITIQUE :
-       * On ne spam plus POST /rdv/slot pour chaque quart d’heure.
-       * On appelle le backend transactionnel :
-       * POST /rdv/schedule/apply { medecinId, date, start, end }
-       *
-       * => overwrite propre dans l’intervalle
-       * => plus de slots fantômes / incohérences
+       * POST /rdv/schedule/apply { medecinId, date, start, end, typeSlot? / deleteOnly? }
+       * - VIERGE => deleteOnly + intervalle
+       * - LIBRE/BLOQUE => typeSlot
        */
       if (mode === "day") {
         const dayKey = getDayKeyFromSelectedDay();
@@ -423,11 +525,13 @@ export default function ScheduleDrawer({
               date,
               start,
               end,
+              ...(slotMode === "VIERGE"
+                ? { deleteOnly: true }
+                : { typeSlot: slotMode }),
             }),
           });
         }
 
-        // ✅ micro-fix : refresh local daySlots avant fermeture
         await loadDay();
       }
 
@@ -447,12 +551,14 @@ export default function ScheduleDrawer({
                 date,
                 start,
                 end,
+                ...(slotMode === "VIERGE"
+                  ? { deleteOnly: true }
+                  : { typeSlot: slotMode }),
               }),
             });
           }
         }
 
-        // ✅ micro-fix : refresh local weekSlots avant fermeture
         await loadWeek();
       }
 
@@ -474,9 +580,10 @@ export default function ScheduleDrawer({
         ? toISODateOnly(getDateForDay(baseDate, day))
         : selectedDay || "";
 
-    const slotsForThisCard =
+    const slotsForThisCardRaw =
       mode === "week" ? weekSlots[dateIso] || [] : daySlots;
 
+    const slotsForThisCard = normalizeSlotsForDisplay(day, slotsForThisCardRaw);
     const loadingSlots = mode === "week" ? loadingWeek : loadingDay;
 
     return (
@@ -488,7 +595,7 @@ export default function ScheduleDrawer({
           <h3 className="text-lg font-semibold capitalize text-white">{day}</h3>
 
           <button
-            onClick={() => handleDayOff(day, slotsForThisCard)}
+            onClick={() => handleDayOff(day)}
             className="px-4 py-2 rounded-lg border border-red-500 text-red-300 hover:bg-red-600 hover:text-white transition font-semibold"
             disabled={saving}
           >
@@ -496,7 +603,7 @@ export default function ScheduleDrawer({
           </button>
         </div>
 
-        {/* 🎯 SLOTS RÉELS — MÊME DA QU’AVANT (jour + semaine) */}
+        {/* 🎯 SLOTS RÉELS — même UI, mais poubelle = VIERGE (deleteOnly) */}
         <div className="space-y-2 mb-4">
           {loadingSlots && (
             <p className="text-slate-400 italic text-sm">Chargement…</p>
@@ -520,7 +627,13 @@ export default function ScheduleDrawer({
 
                   {s.typeSlot !== "PRIS" && (
                     <button
-                      onClick={() => setSlotsHors(s.rdvIds)}
+                      onClick={() =>
+                        handleTrashInterval({
+                          dateIso,
+                          start: s.start,
+                          endGrouped: s.end,
+                        })
+                      }
                       className="text-red-400 hover:text-red-300"
                       disabled={saving}
                     >
@@ -589,11 +702,46 @@ export default function ScheduleDrawer({
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex justify-center items-center z-[9999]">
       <div className="bg-slate-900 rounded-2xl p-10 w-[80%] h-[80%] overflow-auto border border-slate-700 shadow-2xl">
         <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-emerald-400">
-            {mode === "week"
-              ? "Horaires de la semaine"
-              : `Horaires du ${selectedDay}`}
-          </h2>
+          <div className="flex flex-col gap-3">
+            <h2 className="text-2xl font-bold text-emerald-400">
+              {mode === "week"
+                ? "Horaires de la semaine"
+                : `Horaires du ${selectedDay}`}
+            </h2>
+
+            {/* ✅ UI inchangée : choix VIERGE / LIBRE / BLOQUE */}
+            <div className="flex gap-6 items-center">
+              <label className="flex items-center gap-2 text-slate-200 font-semibold">
+                <input
+                  type="radio"
+                  name="slotMode"
+                  checked={slotMode === "VIERGE"}
+                  onChange={() => setSlotMode("VIERGE")}
+                />
+                Vierge
+              </label>
+
+              <label className="flex items-center gap-2 text-slate-200 font-semibold">
+                <input
+                  type="radio"
+                  name="slotMode"
+                  checked={slotMode === "LIBRE"}
+                  onChange={() => setSlotMode("LIBRE")}
+                />
+                Libre
+              </label>
+
+              <label className="flex items-center gap-2 text-slate-200 font-semibold">
+                <input
+                  type="radio"
+                  name="slotMode"
+                  checked={slotMode === "BLOQUE"}
+                  onChange={() => setSlotMode("BLOQUE")}
+                />
+                Bloqué
+              </label>
+            </div>
+          </div>
 
           <div className="flex gap-4">
             <button
@@ -604,10 +752,7 @@ export default function ScheduleDrawer({
               {saving ? "Enregistrement..." : "Enregistrer"}
             </button>
 
-            <button
-              onClick={() => onClose()}
-              className="text-slate-300 text-xl"
-            >
+            <button onClick={() => onClose()} className="text-slate-300 text-xl">
               ✕
             </button>
           </div>

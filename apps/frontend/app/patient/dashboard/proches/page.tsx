@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import AddProcheModal from "./AddProcheModal";
 import EditProcheModal from "./EditProcheModal";
 
 export default function ProchesPage() {
+  const router = useRouter();
+
   const [proches, setProches] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAdd, setShowAdd] = useState(false);
@@ -83,6 +86,16 @@ export default function ProchesPage() {
 
   return (
     <div className="p-8 max-w-2xl mx-auto space-y-6">
+      {/* HEADER */}
+      <div className="flex items-center gap-4">
+        <button
+          onClick={() => router.push("/patient/dashboard")}
+          className="text-sm text-gray-600 hover:text-gray-900 underline"
+        >
+          ← Retour au dashboard
+        </button>
+      </div>
+
       <h1 className="text-2xl font-bold">Mes proches</h1>
 
       <button

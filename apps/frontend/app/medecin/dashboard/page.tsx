@@ -229,13 +229,22 @@ export default function MedecinDashboard() {
   /* -------------------------------------------------------
      🔥 UNIFICATION AFFICHAGE DES CRENEAUX (RÉEL UNIQUEMENT)
   ---------------------------------------------------------*/
-  const computeSlotVisual = (rdv: Rdv | undefined) => {
-    const slotType = (rdv?.typeSlot || "").toLowerCase() as
-      | "hors"
-      | "libre"
-      | "pris"
-      | "bloque"
-      | "";
+const computeSlotVisual = (rdv: Rdv | undefined) => {
+  // ✅ CASE VIERGE ABSOLUE
+  if (!rdv) {
+    return {
+      label: "",
+      className: "bg-slate-900/40 border border-slate-700 text-slate-500",
+      showMotif: false,
+    };
+  }
+
+  const slotType = (rdv.typeSlot || "").toLowerCase() as
+    | "libre"
+    | "pris"
+    | "bloque"
+    | "";
+
 
     if (slotType === "bloque") {
       return {
@@ -647,13 +656,6 @@ export default function MedecinDashboard() {
                 (() => {
                   const dateStr = toISODate(selectedDate);
 
-                  const hasAnyContent = hours.some((hour) => {
-                    const rdv = getCellRdv(dateStr, hour);
-                    return !!rdv;
-                  });
-
-                  if (!hasAnyContent) return <p>Aucun créneau aujourd’hui.</p>;
-
                   return (
                     <div className="space-y-2">
                       {hours
@@ -825,13 +827,13 @@ export default function MedecinDashboard() {
         rdvId={modal.rdvId ?? undefined}
         medecinId={medecin?.id}
         // ✅ AJOUT : contexte slot pour UI + cohérence
-        typeSlot={
-          (() => {
-            const rdv = getCellRdv(modal.date, modal.heure);
-            const t = (rdv?.typeSlot || "").toUpperCase();
-            return (t as any) || undefined;
-          })()
-        }
+typeSlot={
+  (() => {
+    const rdv = getCellRdv(modal.date, modal.heure);
+    return rdv?.typeSlot ?? undefined;
+  })()
+}
+
         formulaireDemande={
           (() => {
             const rdv = getCellRdv(modal.date, modal.heure) as any;

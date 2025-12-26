@@ -13,10 +13,10 @@ export class CronService {
   ) {}
 
   /**
-   * CRON – Toutes les 30 minutes
-   * Récupère les RDV dans les prochaines 24h
-   * dont le formulaire n'est pas rempli
-   * et dont le rappel n'a pas encore été envoyé
+   * ⏳ CRON – Toutes les 30 minutes
+   * Envoie un rappel aux patients dont le RDV est dans les 24h,
+   * dont le formulaire n’est pas rempli,
+   * et pour lesquels aucun rappel n’a encore été envoyé.
    */
   @Cron(CronExpression.EVERY_30_MINUTES)
   async remindFormulaire() {
@@ -57,7 +57,7 @@ export class CronService {
         form.rdvId,
       );
 
-      // Marquer rappel comme envoyé
+      // Marquer le rappel comme envoyé sur le RDV
       await this.prisma.rendezVous.update({
         where: { id: form.rdvId },
         data: { rappelEnvoye: true },
@@ -67,5 +67,32 @@ export class CronService {
         `✔ Rappel envoyé pour RDV ${form.rdvId} → ${form.patient.email}`,
       );
     }
+  }
+
+  /**
+   * 🧹 CRON – Tous les jours à 01:00
+   * Supprime les formulaires de pré-consultation
+   * dont le RDV est passé (la veille ou avant).
+   *
+   * ➜ Conformité RGPD / nettoyage automatique
+   */
+  @Cron(CronExpression.EVERY_DAY_AT_1AM)
+  async cleanupExpiredFormulaires() {
+    this.logger.log('🧹 Nettoyage des formulaires expirés…');
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const result =
+      await this.formulaireService.deleteExpiredFormulaires();
+
+    if (result.count === 0) {
+      this.logger.log('Aucun formulaire à supprimer.');
+      return;
+    }
+
+    this.logger.log(
+      `🗑️ ${result.count} formulaires supprimés (RDV passés)`,
+    );
   }
 }
